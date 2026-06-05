@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  CEGIS Assessment Platform - Admin console.
+  Single-file static page (same pattern as the existing PMDT tool):
+  Supabase via CDN with Row-Level Security; all destructive actions are
+  soft deletes through database functions. See README.md for setup.
+
+  The Content-Security-Policy restricts what can run:
+    - scripts: this site + jsDelivr (Supabase + SheetJS come from there)
+    - network: only your Supabase project
+-->
+<meta http-equiv="Content-Security-Policy"
+  content="default-src 'self';
+           script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;
+           style-src 'self' 'unsafe-inline';
+           connect-src https://*.supabase.co;
+           img-src 'self' data:;
+           font-src 'self';">
+<title>CEGIS Assessment Platform</title>
+<link rel="stylesheet" href="assets/app.css">
+</head>
+<body>
+
+<!-- ===== CEGIS header (same as the existing internal tool) ===== -->
+<header class="site-header">
+  <img src="cegis_logo.png" alt="CEGIS" onerror="this.style.display='none'">
+  <div>
+    <h1>Assessment Platform</h1>
+    <p>Centre for Effective Governance of Indian States</p>
+  </div>
+  <div class="hgrow"></div>
+  <!-- controls appear only after sign-in; admin.js toggles this -->
+  <div class="hbar" id="hbar" style="display:none">
+    <div class="avatar" id="hbarAv">–</div>
+    <span class="small" id="hbarName" style="font-weight:600;color:var(--n700)"></span>
+    <button class="btn ghost sm" onclick="doSignout()">Sign out</button>
+  </div>
+</header>
+
+<!-- ===== Auth screen (shown when there is no session) ===== -->
+<div id="authScreen" class="auth-wrap" style="display:none">
+  <!-- left: info panel -->
+  <div class="auth-left">
+    <h2>Assessment administration</h2>
+    <p>Build competency assessments, upload question banks from Excel, set
+       respondent limits, and review results &mdash; all in one console.</p>
+    <p>Every record is kept safely: nothing is ever hard-deleted, scoring is
+       done on the server, and access is protected by row-level security.</p>
+    <p style="margin-top:auto;font-size:.75rem;opacity:.75">For the
+       Personnel Management vertical &middot; GoHRM</p>
+  </div>
+  <!-- right: login / sign-up card -->
+  <div class="auth-right">
+    <div class="auth-card">
+      <h1>Welcome</h1>
+      <div class="sub">Sign in to manage your assessments.</div>
+
+      <div class="auth-tabs">
+        <button class="auth-tab active" id="tab-login-btn" onclick="switchTab('login')">Sign in</button>
+        <button class="auth-tab" id="tab-signup-btn" onclick="switchTab('signup')">Create account</button>
+      </div>
+
+      <!-- login panel -->
+      <div class="auth-panel active" id="tab-login">
+        <div class="alert" id="login-err"></div>
+        <div class="alert" id="login-ok"></div>
+        <div class="field">
+          <label class="label" for="login-email">Email</label>
+          <input class="input" id="login-email" type="email" autocomplete="email" placeholder="you@cegis.org">
+        </div>
+        <div class="field">
+          <label class="label" for="login-pass">Password</label>
+          <input class="input" id="login-pass" type="password" autocomplete="current-password" placeholder="Your password">
+        </div>
+        <button class="btn" style="width:100%" onclick="doLogin()">Sign in</button>
+        <div style="text-align:center;margin-top:12px">
+          <a href="javascript:void(0)" onclick="doForgot()" class="small" style="font-weight:600">Forgot password?</a>
+        </div>
+      </div>
+
+      <!-- sign-up panel -->
+      <div class="auth-panel" id="tab-signup">
+        <div class="alert" id="signup-err"></div>
+        <div class="alert" id="signup-ok"></div>
+        <div class="field">
+          <label class="label" for="signup-name">Full name</label>
+          <input class="input" id="signup-name" type="text" autocomplete="name" placeholder="Your name">
+        </div>
+        <div class="field">
+          <label class="label" for="signup-email">Email</label>
+          <input class="input" id="signup-email" type="email" autocomplete="email" placeholder="you@cegis.org">
+        </div>
+        <div class="field">
+          <label class="label" for="signup-pass">Password</label>
+          <input class="input" id="signup-pass" type="password" autocomplete="new-password" placeholder="At least 8 characters">
+        </div>
+        <button class="btn green" style="width:100%" onclick="doSignup()">Create account</button>
+        <p class="muted small" style="margin-top:12px">You will get a verification email. Confirm it, then sign in.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== App shell (rail + main are injected by admin.js) ===== -->
+<div id="app" class="layout" style="display:none"></div>
+
+<!-- ===== Footer (same as the existing internal tool) ===== -->
+<footer class="site-footer">
+  Designed and developed by the <a href="https://cegis.org" target="_blank" rel="noopener">CEGIS Foundation</a>
+  &nbsp;&middot;&nbsp; Assessment Platform
+</footer>
+
+<!-- modal + toast mount points -->
+<div id="modalRoot"></div>
+<div id="toast"></div>
+
+<!-- ===== Scripts ===== -->
+<!-- order matters: config first, then libraries, then our shared code, then the portal logic -->
+<script src="assets/config.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="assets/common.js"></script>
+<script src="assets/octopus.js"></script>
+<script src="assets/admin.js"></script>
+</body>
+</html>

@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- CEGIS Assessment Platform - participant portal. See README.md for setup. -->
+<meta http-equiv="Content-Security-Policy"
+  content="default-src 'self';
+           script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;
+           style-src 'self' 'unsafe-inline';
+           connect-src https://*.supabase.co;
+           img-src 'self' data:;
+           font-src 'self';">
+<meta name="robots" content="noindex, nofollow">
+<title>CEGIS Assessment — Participant Portal</title>
+<link rel="stylesheet" href="assets/app.css">
+</head>
+<body>
+
+<header class="site-header">
+  <img src="cegis_logo.png" alt="CEGIS" onerror="this.style.display='none'">
+  <div>
+    <h1>Assessment Portal</h1>
+    <p>Centre for Effective Governance of Indian States</p>
+  </div>
+  <div class="hgrow"></div>
+  <div class="hbar" id="phbar" style="display:none">
+    <div class="avatar" id="phAv">–</div>
+    <span class="small" id="phName" style="font-weight:600;color:var(--n700)"></span>
+    <button class="btn ghost sm" onclick="doParticipantSignout()">Sign out</button>
+  </div>
+</header>
+
+<main class="main" id="stage" style="flex:1"></main>
+
+<footer class="site-footer">
+  Designed and developed by the <a href="https://cegis.org" target="_blank" rel="noopener">CEGIS Foundation</a>
+  &nbsp;&middot;&nbsp; Assessment Platform
+</footer>
+
+<div id="modalRoot"></div>
+<div id="toast"></div>
+
+<script src="assets/config.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="assets/common.js"></script>
+<script src="assets/octopus.js"></script>
+<script src="assets/portal.js"></script>
+</body>
+</html>

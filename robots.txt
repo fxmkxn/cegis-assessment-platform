@@ -1,0 +1,4 @@
+# CEGIS Assessment Platform
+# This is a private tool. Search engines should not index it.
+User-agent: *
+Disallow: /
