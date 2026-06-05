@@ -120,15 +120,24 @@ function parseQuestionRows(rows) {
     else if (t === "mcqmca" || t === "mca" || t === "multi" || t === "multiple") q.q_type = "mcqmca";
     else if (t === "tf" || t === "truefalse" || t === "boolean") q.q_type = "tf";
     else if (t === "rating" || t === "scale" || t === "likert") q.q_type = "rating";
+    // yesno is used for WPCAS questions; the type column can say yesno, yes/no,
+    // wpcas, or be left blank — admin.js handleFile forces it to yesno anyway,
+    // but normalising here means the validator also sees the right type
+    else if (t === "yesno" || t === "wpcas" || t === "yn") q.q_type = "yesno";
     return q;
   });
 }
 
 // validate one normalised question; returns {level:'ok'|'warn'|'err', msg}
-// pass isWpca=true for a WPCA assessment, where every item is a rating scale
-function validateQuestion(q, isWpca) {
+// pass isWpca=true for WPCA (360 rating) assessment
+// pass isWpcas=true for WPCAS (yes/no) assessment
+function validateQuestion(q, isWpca, isWpcas) {
   if (!q.q_stem) return { level: "err", msg: "Question text is empty" };
   var opts = [q.opt1, q.opt2, q.opt3, q.opt4, q.opt5].filter(function (o) { return o && o.length; });
+  // WPCAS yes/no: only the stem is needed, Yes/No options are injected automatically
+  if (isWpcas || q.q_type === "yesno") {
+    return { level: "ok", msg: "Valid yes/no item" };
+  }
   if (isWpca) {
     // a WPCA item is a rating scale: blank type is treated as 'rating'
     if (q.q_type && q.q_type !== "rating") return { level: "warn", msg: "WPCA items are rating scales; type will be set to rating" };
