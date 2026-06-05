@@ -8,6 +8,6 @@
 // scoring, participant creation, and rater finalisation all run inside the
 // database as SECURITY DEFINER functions.
 window.CEGIS_CONFIG = {
-  SUPABASE_URL: "https://YOUR-PROJECT.supabase.co",
-  SUPABASE_ANON_KEY: "your-anon-public-key"
+  SUPABASE_URL: "https://lmjivbgakpmvubodopju.supabase.co",
+  SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imxtaml2Ymdha3BtdnVib2RvcGp1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2NDA5NzYsImV4cCI6MjA5NjIxNjk3Nn0.uENFe_mVRLpj5c593AZ5isHddhIH-xGtrxlVkG3fpZ8"
 };
