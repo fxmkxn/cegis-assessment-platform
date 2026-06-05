@@ -12,13 +12,15 @@
   The Content-Security-Policy restricts what can run:
     - scripts: this site + jsDelivr (Supabase + SheetJS come from there)
     - network: only your Supabase project
+    - images: this site, data URIs, and the public Supabase bucket (question
+      images + previews) on the *.supabase.co domain
 -->
 <meta http-equiv="Content-Security-Policy"
   content="default-src 'self';
            script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;
            style-src 'self' 'unsafe-inline';
            connect-src https://*.supabase.co;
-           img-src 'self' data:;
+           img-src 'self' data: blob: https://*.supabase.co;
            font-src 'self';">
 <title>CEGIS Assessment Platform</title>
 <link rel="stylesheet" href="assets/app.css">
@@ -46,8 +48,9 @@
   <!-- left: info panel -->
   <div class="auth-left">
     <h2>Assessment administration</h2>
-    <p>Build competency assessments, upload question banks from Excel, set
-       respondent limits, and review results &mdash; all in one console.</p>
+    <p>Create instances, upload participants, build WPCAS (360) and objective
+       assessments, schedule when each one opens and closes, finalise 360 rater
+       panels, and review results &mdash; all in one console.</p>
     <p>Every record is kept safely: nothing is ever hard-deleted, scoring is
        done on the server, and access is protected by row-level security.</p>
     <p style="margin-top:auto;font-size:.75rem;opacity:.75">For the
@@ -119,12 +122,13 @@
 <div id="toast"></div>
 
 <!-- ===== Scripts ===== -->
-<!-- order matters: config first, then libraries, then our shared code, then the portal logic -->
+<!-- order matters: config first, then libraries, then shared code, then the admin logic -->
 <script src="assets/config.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="assets/common.js"></script>
 <script src="assets/octopus.js"></script>
+<!-- admin.js is created separately (the admin logic file) -->
 <script src="assets/admin.js"></script>
 </body>
 </html>

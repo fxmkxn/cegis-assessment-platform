@@ -5,15 +5,17 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <!--
   CEGIS Assessment Platform - respondent page (public).
-  Reached with a link like  take.html?a=<assessment-id>.
+  Reached with a link like  take.html?a=<assessment-id>  or  take.html?k=<key>.
   No login. Scoring is done on the server. See README.md for setup.
+  img-src includes the public Supabase bucket so objective questions can show
+  their uploaded images.
 -->
 <meta http-equiv="Content-Security-Policy"
   content="default-src 'self';
            script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;
            style-src 'self' 'unsafe-inline';
            connect-src https://*.supabase.co;
-           img-src 'self' data: blob:;
+           img-src 'self' data: blob: https://*.supabase.co;
            font-src 'self';">
 <meta name="robots" content="noindex, nofollow">
 <title>CEGIS Assessment</title>
