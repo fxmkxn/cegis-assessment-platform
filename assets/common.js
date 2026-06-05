@@ -1,4 +1,4 @@
-// CEGIS Assessment Platform - shared helpers used by both portals.
+// CEGIS Assessment Platform - shared helpers used by all portals.
 // Plain language, single-line comments only, since the maintainer is most
 // comfortable with Python and HTML.
 
@@ -14,10 +14,17 @@ function initSupabase() {
   return db;
 }
 
+// the WPCAS answer scale is always the same two choices, in this fixed order:
+// option 1 = "Yes", option 2 = "No". (The server scores "Yes" as the marks.)
+var YESNO_OPTS = ["Yes", "No"];
+
 // ---- small DOM + text helpers ----
 function escHtml(s) {
   return String(s == null ? "" : s)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+function escAttr(s) {
+  return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
 }
 function initials(n) {
   return String(n || "?").trim().split(/\s+/).map(function (w) { return w[0]; }).slice(0, 2).join("").toUpperCase();
@@ -72,7 +79,10 @@ function friendlyError(err) {
     "already completed": "This email has already completed the assessment.",
     "respondent limit": "This assessment has reached its respondent limit.",
     "already submitted": "This attempt has already been submitted.",
-    "Name and email are required": "Please enter your name and email."
+    "Name and email are required": "Please enter your name and email.",
+    "Invalid email or password": "That email or password is not correct.",
+    "window is not open yet": "Your assessment window is not open yet. Please check with your administrator.",
+    "at most 6 peers": "You can choose at most 6 peers."
   };
   for (var k in map) { if (msg.indexOf(k) !== -1) return map[k]; }
   // strip anything that looks like internal noise
@@ -82,8 +92,14 @@ function friendlyError(err) {
 
 // =====================================================================
 // EXCEL PARSING + VALIDATION  (uses the global XLSX from the CDN)
-// Expected headers: no, q_type, q_level, q_competency, q_facet, q_stem,
-//   opt1..opt5, isopt1correct..isopt5correct
+//
+// Objective assessments (Baseline / Endline / EoCA) keep the original headers:
+//   no, q_type, q_level, q_competency, q_facet, q_stem, opt1..opt5,
+//   isopt1correct..isopt5correct, marks, and an optional image / image_url.
+//
+// WPCAS assessments are SIMPLER: each row is just a statement answered Yes/No.
+// The only column that matters is q_stem (plus optional no, q_competency,
+// q_facet, marks). We force q_type = 'yesno' and ignore any options column.
 // =====================================================================
 function normHeader(s) { return String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "").trim(); }
 
@@ -105,7 +121,10 @@ function parseQuestionRows(rows) {
       q_level: g("q_level") || g("level"),
       q_competency: g("q_competency") || g("competency"),
       q_facet: g("q_facet") || g("facet"),
-      q_stem: g("q_stem") || g("questiontext") || g("question") || g("stem"),
+      q_stem: g("q_stem") || g("questiontext") || g("question") || g("statement") || g("stem"),
+      // optional image: either a full URL the admin pasted, or a file name they
+      // will upload later (admin.js resolves names to uploaded URLs).
+      image_url: g("image_url") || g("imageurl") || g("image"),
       opt1: g("opt1"), opt2: g("opt2"), opt3: g("opt3"), opt4: g("opt4"), opt5: g("opt5"),
       marks: (function () { var m = parseFloat(g("marks")); return isNaN(m) ? 0 : m; })(),
       isopt1correct: truthy(map[normHeader("isopt1correct")]),
@@ -119,32 +138,23 @@ function parseQuestionRows(rows) {
     if (t === "mcqsca" || t === "sca" || t === "single") q.q_type = "mcqsca";
     else if (t === "mcqmca" || t === "mca" || t === "multi" || t === "multiple") q.q_type = "mcqmca";
     else if (t === "tf" || t === "truefalse" || t === "boolean") q.q_type = "tf";
-    else if (t === "rating" || t === "scale" || t === "likert") q.q_type = "rating";
-    // yesno is used for WPCAS questions; the type column can say yesno, yes/no,
-    // wpcas, or be left blank — admin.js handleFile forces it to yesno anyway,
-    // but normalising here means the validator also sees the right type
-    else if (t === "yesno" || t === "wpcas" || t === "yn") q.q_type = "yesno";
+    else if (t === "yesno" || t === "yn" || t === "yesorno") q.q_type = "yesno";
     return q;
   });
 }
 
 // validate one normalised question; returns {level:'ok'|'warn'|'err', msg}
-// pass isWpca=true for WPCA (360 rating) assessment
-// pass isWpcas=true for WPCAS (yes/no) assessment
-function validateQuestion(q, isWpca, isWpcas) {
+// pass isWpca=true for a WPCAS assessment, where every item is a Yes/No statement
+function validateQuestion(q, isWpca) {
   if (!q.q_stem) return { level: "err", msg: "Question text is empty" };
-  var opts = [q.opt1, q.opt2, q.opt3, q.opt4, q.opt5].filter(function (o) { return o && o.length; });
-  // WPCAS yes/no: only the stem is needed, Yes/No options are injected automatically
-  if (isWpcas || q.q_type === "yesno") {
-    return { level: "ok", msg: "Valid yes/no item" };
-  }
   if (isWpca) {
-    // a WPCA item is a rating scale: blank type is treated as 'rating'
-    if (q.q_type && q.q_type !== "rating") return { level: "warn", msg: "WPCA items are rating scales; type will be set to rating" };
-    if (opts.length < 2) return { level: "err", msg: "A rating item needs at least 2 scale points (opt1, opt2, ...)" };
+    // WPCAS: only the statement matters; options are fixed to Yes / No
+    if (q.q_type && q.q_type !== "yesno") return { level: "warn", msg: "WPCAS items are Yes/No; type will be set to yesno" };
     if (!q.q_competency) return { level: "warn", msg: "No competency set — results will group under 'General'" };
-    return { level: "ok", msg: "Valid rating item" };
+    return { level: "ok", msg: "Valid Yes/No item" };
   }
+  // objective items
+  var opts = [q.opt1, q.opt2, q.opt3, q.opt4, q.opt5].filter(function (o) { return o && o.length; });
   if (["mcqsca", "mcqmca", "tf"].indexOf(q.q_type) === -1)
     return { level: "err", msg: "Unknown type '" + (q.q_type || "blank") + "' (use mcqsca, mcqmca, tf)" };
   var keys = [q.isopt1correct, q.isopt2correct, q.isopt3correct, q.isopt4correct, q.isopt5correct];
@@ -176,6 +186,36 @@ function readWorkbook(arrayBuffer) {
     return { questions: questions, error: null };
   } catch (e) {
     return { questions: [], error: "Could not read the spreadsheet. Make sure it is a valid .xlsx file." };
+  }
+}
+
+// read an .xlsx of assessment-takers. Expected headers (forgiving):
+//   full_name, email, employee_id, designation, department, location,
+//   workstream, reporting_manager_email
+// "location" is the city, used later by the automatic rater selection.
+function readParticipants(arrayBuffer) {
+  try {
+    var wb = XLSX.read(arrayBuffer, { type: "array" });
+    var ws = wb.Sheets[wb.SheetNames[0]];
+    var rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
+    rows = rows.filter(function (r) { return Object.keys(r).some(function (k) { return String(r[k]).trim() !== ""; }); });
+    var people = rows.map(function (raw) {
+      var map = {}; Object.keys(raw).forEach(function (k) { map[normHeader(k)] = raw[k]; });
+      function g() { for (var i = 0; i < arguments.length; i++) { var v = map[normHeader(arguments[i])]; if (v != null && String(v).trim() !== "") return String(v).trim(); } return ""; }
+      return {
+        full_name: g("full_name", "name", "fullname"),
+        email: g("email", "emailid", "mail").toLowerCase(),
+        employee_id: g("employee_id", "empid", "employeeid"),
+        designation: g("designation", "role", "title"),
+        department: g("department", "dept"),
+        location: g("location", "office", "city"),
+        workstream: g("workstream", "stream", "team"),
+        reporting_manager_email: g("reporting_manager_email", "manageremail", "manager", "reportingmanager").toLowerCase()
+      };
+    });
+    return { people: people, error: null };
+  } catch (e) {
+    return { people: [], error: "Could not read the spreadsheet. Make sure it is a valid .xlsx file." };
   }
 }
 
@@ -217,7 +257,7 @@ function histogram(percents) {
   return barChart(data, { color: CHART.orange });
 }
 
-// grouped bars: two series per category (used for WPCA self vs others).
+// grouped bars: two series per category (used for WPCAS self vs others).
 // data = [{label, a, b}], names {a, b}
 function groupedBars(data, names) {
   names = names || { a: "Self", b: "Others" };
@@ -244,31 +284,13 @@ function groupedBars(data, names) {
   return '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%">' + grid + bars + legend + '</svg>';
 }
 
-// read an .xlsx of assessment-takers. Expected headers (forgiving):
-//   full_name, email, employee_id, designation, department, location,
-//   workstream, reporting_manager_email
-function readParticipants(arrayBuffer) {
-  try {
-    var wb = XLSX.read(arrayBuffer, { type: "array" });
-    var ws = wb.Sheets[wb.SheetNames[0]];
-    var rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
-    rows = rows.filter(function (r) { return Object.keys(r).some(function (k) { return String(r[k]).trim() !== ""; }); });
-    var people = rows.map(function (raw) {
-      var map = {}; Object.keys(raw).forEach(function (k) { map[normHeader(k)] = raw[k]; });
-      function g() { for (var i = 0; i < arguments.length; i++) { var v = map[normHeader(arguments[i])]; if (v != null && String(v).trim() !== "") return String(v).trim(); } return ""; }
-      return {
-        full_name: g("full_name", "name", "fullname"),
-        email: g("email", "emailid", "mail").toLowerCase(),
-        employee_id: g("employee_id", "empid", "employeeid"),
-        designation: g("designation", "role", "title"),
-        department: g("department", "dept"),
-        location: g("location", "office", "city"),
-        workstream: g("workstream", "stream", "team"),
-        reporting_manager_email: g("reporting_manager_email", "manageremail", "manager", "reportingmanager").toLowerCase()
-      };
-    });
-    return { people: people, error: null };
-  } catch (e) {
-    return { people: [], error: "Could not read the spreadsheet. Make sure it is a valid .xlsx file." };
-  }
+// ---- local storage + DOM-ready, shared by portal.js and take.js ----
+function readLS(k) { try { var v = localStorage.getItem(k); return v ? JSON.parse(v) : null; } catch (e) { return null; } }
+function writeLS(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+function removeLS(k) { try { localStorage.removeItem(k); } catch (e) {} }
+
+// run fn once the DOM is ready, even if that already happened
+function onReady(fn) {
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", fn);
+  else fn();
 }

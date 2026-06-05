@@ -1,6 +1,21 @@
-// CEGIS Assessment Platform - respondent portal (the public "take" page).
-// No login. The page is reached with a link like  take.html?a=<assessment-id>.
-// All scoring happens on the server; this page never sees the answer key.
+// CEGIS Assessment Platform - respondent "take" page.
+// Reached by a link like take.html?a=<assessment-id>  (objective assessment)
+// or take.html?k=<access-key>  (a shared key that resolves to an objective
+// assessment OR a WPCAS 360 review task).
+//
+// IMPORTANT security notes carried over from the first build:
+//   * All scoring happens on the SERVER. This page never receives the answer
+//     key, so a respondent cannot read the correct answers from the browser.
+//   * Anti-cheat events (tab switch, leaving full screen, copy, dev-tools, etc.)
+//     are LOGGED on the server but never block or end the attempt.
+//   * Whether an assessment may be started is decided by the server (the
+//     `is_open` flag below already folds in is_active + the activate/deactivate
+//     window + whether the instance is live). The browser only mirrors it.
+//
+// Shared helpers (escHtml, escAttr, toast, showModal, friendlyError, fmtDuration,
+// readLS/writeLS/removeLS, onReady, initSupabase) all live in common.js and are
+// NOT redefined here.
+//
 // Plain language, single-line comments, since the maintainer mostly uses
 // Python and HTML.
 
@@ -8,7 +23,7 @@ var TAKE = {
   aId: null,            // assessment id from the URL
   assessment: null,     // public assessment row
   questions: [],        // questions in display order
-  respondentId: null,   // returned by start_respondent
+  respondentId: null,   // returned by start_respondent / start_wpca
   answers: {},          // { questionId: [optionNumbers] }
   flags: {},            // { questionId: true }
   order: [],            // question ids in display order
@@ -18,7 +33,9 @@ var TAKE = {
   timerHandle: null,
   secActive: false,     // are the anti-cheat listeners live?
   secCount: 0,          // how many security events we have seen
-  watermark: ""         // name + email shown faintly across the screen
+  watermark: "",        // name + email shown faintly across the screen
+  wpca: null,           // set when this is a 360 review task
+  wpcaKey: null         // the access key used to start a 360 review
 };
 
 // ---------------------------------------------------------------- boot
@@ -41,7 +58,7 @@ onReady(function () {
   loadIntro();
 });
 
-// a shared access key can point at an objective assessment or a WPCA task
+// a shared access key can point at an objective assessment or a WPCAS task
 function resolveKey(key) {
   showLoader("Opening...");
   db.rpc("resolve_key", { p_key: key }).then(function (r) {
@@ -75,7 +92,26 @@ function noticeCard(title, msg, tone) {
     + '<p class="muted" style="margin-top:10px">' + escHtml(msg) + '</p></div>';
 }
 
-// ---------------------------------------------------------------- intro
+// Build the right "not open" message from the schedule fields. The server is the
+// source of truth (is_open); we only word the reason nicely for the respondent.
+function closedNotice(a) {
+  var now = Date.now();
+  var act = a.activate_at ? new Date(a.activate_at).getTime() : null;
+  var deact = a.deactivate_at ? new Date(a.deactivate_at).getTime() : null;
+  if (act && now < act) {
+    return noticeCard("Not open yet",
+      "This assessment opens on " + fmtDate(a.activate_at) + ". Please come back then.", "warn");
+  }
+  if (deact && now > deact) {
+    return noticeCard("Closed",
+      "This assessment closed on " + fmtDate(a.deactivate_at) + ". Please contact the administrator.", "warn");
+  }
+  // is_active false, or the instance is not live yet
+  return noticeCard("Not open right now",
+    "This assessment is not currently open. Please check with the administrator.", "warn");
+}
+
+// ---------------------------------------------------------------- intro (objective)
 function loadIntro() {
   showLoader("Loading assessment...");
   db.rpc("get_public_assessment", { p_assessment_id: TAKE.aId }).then(function (res) {
@@ -84,10 +120,8 @@ function loadIntro() {
     var row = (res.data && res.data[0]) || null;
     if (!row) { render(noticeCard("Not found", "We could not find this assessment. The link may be wrong or it may have been removed.")); return; }
     TAKE.assessment = row;
-    if (!row.is_active) {
-      render(noticeCard("Not open right now", "This assessment is not currently open. Please check with the administrator.", "warn"));
-      return;
-    }
+    // schedule + instance-live + active are all folded into is_open by the server
+    if (!row.is_open) { render(closedNotice(row)); return; }
     if (row.seats_left !== null && row.seats_left <= 0) {
       render(noticeCard("Fully subscribed", "This assessment has reached its respondent limit. No more responses can be accepted.", "warn"));
       return;
@@ -103,7 +137,8 @@ function renderIntro(a) {
   var meta = ''
     + chip("📋", qn + " question" + (qn === 1 ? "" : "s"))
     + (tmin ? chip("⏱", tmin + " min time limit") : chip("⏱", "No time limit"))
-    + (seats !== null ? chip("👥", seats + " place" + (seats === 1 ? "" : "s") + " left") : "");
+    + (seats !== null ? chip("👥", seats + " place" + (seats === 1 ? "" : "s") + " left") : "")
+    + (a.deactivate_at ? chip("📅", "Closes " + fmtDate(a.deactivate_at)) : "");
 
   render(''
     + '<div class="player-wrap">'
@@ -141,7 +176,7 @@ function field(label, inner) {
   return '<div class="field"><label class="label">' + label + '</label>' + inner + '</div>';
 }
 
-// ---------------------------------------------------------------- begin
+// ---------------------------------------------------------------- begin (objective)
 // triggered by a button click, so this is a user gesture and we can ask for
 // full screen here.
 function beginAttempt() {
@@ -229,7 +264,7 @@ function loadQuestions() {
   });
 }
 
-// ---------------------------------------------------------------- WPCA (360) intro
+// ---------------------------------------------------------------- WPCAS (360) intro
 function loadWpcaIntro() {
   showLoader("Loading review...");
   db.rpc("get_public_assessment", { p_assessment_id: TAKE.aId }).then(function (res) {
@@ -237,15 +272,16 @@ function loadWpcaIntro() {
     if (res.error || !res.data || !res.data[0]) { render(noticeCard("Not available", "This review could not be loaded.")); return; }
     var a = res.data[0];
     TAKE.assessment = a;
-    if (!a.is_active) { render(noticeCard("Not open right now", "This review is not currently open. Please check with the administrator.", "warn")); return; }
+    // the review window is governed by the same is_open rule as objective tests
+    if (!a.is_open) { render(closedNotice(a)); return; }
     var w = TAKE.wpca;
     render('<div class="player-wrap">'
       + '<div class="card pad" style="margin-bottom:18px">'
-      + '<span class="tag" style="color:var(--blue-d);border-color:var(--blue)">360 review</span>'
+      + '<span class="tag" style="color:var(--blue-d);border-color:var(--blue)">WPCAS 360 review</span>'
       + '<h1 style="font-size:24px;margin-top:8px">' + escHtml(a.title) + '</h1>'
       + '<p style="margin-top:10px">You are reviewing <b>' + escHtml(w.subject_name) + '</b> as their <b>' + escHtml(w.relationship) + '</b>.</p>'
       + (a.intro_text ? '<p class="muted" style="margin-top:8px;white-space:pre-wrap">' + escHtml(a.intro_text) + '</p>' : '')
-      + '<div class="flex g8 wrap" style="margin-top:14px">' + chip("📋", a.question_count + " item" + (a.question_count === 1 ? "" : "s")) + chip("🔒", "Your individual ratings stay confidential") + '</div>'
+      + '<div class="flex g8 wrap" style="margin-top:14px">' + chip("📋", a.question_count + " item" + (a.question_count === 1 ? "" : "s")) + chip("🔒", "Your individual answers stay confidential") + '</div>'
       + '</div>'
       + '<div class="card pad">'
       + '<h3 style="margin-bottom:4px">Confirm it is you</h3>'
@@ -254,7 +290,7 @@ function loadWpcaIntro() {
       + field("Your name", '<input class="input" id="f-name" type="text" value="' + escAttr(w.rater_name || "") + '">')
       + field("Your email", '<input class="input" id="f-email" type="email" value="' + escAttr(w.rater_email || "") + '" readonly>')
       + '<label class="switch" style="margin-top:6px"><input type="checkbox" id="f-consent"> '
-      + '<span class="small">I will rate honestly and understand my individual responses are kept confidential.</span></label>'
+      + '<span class="small">I will answer honestly and understand my individual responses are kept confidential.</span></label>'
       + '<button class="btn" style="width:100%;margin-top:12px" onclick="beginWpca()">Begin review</button>'
       + '</div></div>');
   });
@@ -328,7 +364,7 @@ function answeredPct() {
   return Math.round((done / TAKE.questions.length) * 100);
 }
 
-// build the question stem + options. text is not selectable.
+// build the question stem + optional image + options. text is not selectable.
 function questionHtml(q, i) {
   var sel = TAKE.answers[q.id] || [];
   var stem = '<div style="user-select:none;-webkit-user-select:none;font-size:16px;font-weight:600;margin-bottom:6px">'
@@ -337,17 +373,27 @@ function questionHtml(q, i) {
     ? '<div class="muted small" style="margin-bottom:14px">' + escHtml([q.q_competency, q.q_facet].filter(Boolean).join(" · ")) + '</div>'
     : '<div style="margin-bottom:10px"></div>';
 
+  // NEW: a question may carry an image (baseline / endline / eoca only). The
+  // image is served from the PUBLIC question-images bucket, so showing it to
+  // every taker is fine - it is not part of the secret answer key. CSP on
+  // take.html allows img-src from *.supabase.co.
+  var img = (q.image_url && q.image_url.length)
+    ? '<img class="q-image" src="' + escAttr(q.image_url) + '" alt="Question image" loading="lazy">'
+    : "";
+
   var opts = [q.opt1, q.opt2, q.opt3, q.opt4, q.opt5];
   var body;
 
-  if (q.q_type === "rating") {
-    body = '<div class="muted small" style="margin-bottom:8px">Choose the rating that best fits.</div>'
-      + opts.map(function (o, k) {
-        if (!o || !o.length) return "";
-        var n = k + 1, on = sel.indexOf(n) !== -1;
-        return '<div class="opt ' + (on ? "sel" : "") + '" onclick="setSingle(\'' + q.id + '\',' + n + ')">'
-          + '<span class="rd"></span><span>' + escHtml(o) + '</span></div>';
-      }).join("");
+  if (q.q_type === "yesno") {
+    // WPCAS format: a plain statement answered Yes / No. opt1 = Yes, opt2 = No
+    // are fixed by the schema, but we render whatever option text came back so
+    // the labels always match the stored options.
+    var yn = opts.filter(function (o) { return o && o.length; });
+    if (!yn.length) yn = YESNO_OPTS;   // safety net if options were blank
+    body = '<div class="yesno">' + yn.map(function (o, k) {
+      var n = k + 1;
+      return '<button class="' + (sel.indexOf(n) !== -1 ? "sel" : "") + '" onclick="setSingle(\'' + q.id + '\',' + n + ')">' + escHtml(o) + '</button>';
+    }).join("") + '</div>';
   } else if (q.q_type === "tf") {
     body = '<div class="tf">' + opts.filter(function (o) { return o && o.length; }).map(function (o, k) {
       var n = k + 1;
@@ -369,7 +415,7 @@ function questionHtml(q, i) {
         + '<span class="rd"></span><span>' + escHtml(o) + '</span></div>';
     }).join("");
   }
-  return stem + meta + body;
+  return stem + meta + img + body;
 }
 
 // ---------------------------------------------------------------- answer handlers
@@ -419,6 +465,10 @@ function gotoReview() {
   var answered = TAKE.questions.filter(function (q) { return (TAKE.answers[q.id] || []).length; }).length;
   var unanswered = TAKE.questions.length - answered;
   var flagged = Object.keys(TAKE.flags).length;
+  // wording differs for WPCAS (no right/wrong) vs objective (marked wrong)
+  var unansweredWarn = TAKE.wpca
+    ? '⚠ You have ' + unanswered + ' unanswered item' + (unanswered === 1 ? "" : "s") + '. Please answer them before submitting.'
+    : '⚠ You have ' + unanswered + ' unanswered question' + (unanswered === 1 ? "" : "s") + '. You can still submit, but they will be marked wrong.';
 
   render(watermarkHtml()
     + '<div class="player-wrap">'
@@ -430,7 +480,7 @@ function gotoReview() {
     + tagPill("var(--n600)", unanswered + " unanswered")
     + tagPill("var(--ochre-d)", flagged + " flagged")
     + '</div>'
-    + (unanswered > 0 ? '<div class="flagbanner" style="background:var(--warn-l);color:var(--ochre-d);border-color:var(--ochre)">⚠ You have ' + unanswered + ' unanswered question' + (unanswered === 1 ? "" : "s") + '. You can still submit, but they will be marked wrong.</div>' : '')
+    + (unanswered > 0 ? '<div class="flagbanner" style="background:var(--warn-l);color:var(--ochre-d);border-color:var(--ochre)">' + unansweredWarn + '</div>' : '')
     + '<div class="review-grid" style="margin:6px 0 16px">' + cells + '</div>'
     + '<div class="legend"><span><i style="background:var(--blue)"></i>Answered</span>'
     + '<span><i style="background:var(--n300)"></i>Not answered</span>'
@@ -438,7 +488,7 @@ function gotoReview() {
     + '</div>'
     + '<div class="flex jb" style="margin-top:16px;gap:10px">'
     + (TAKE.mode === "one_at_a_time" ? '<button class="btn ghost" onclick="renderPlayer()">← Back to questions</button>' : '<button class="btn ghost" onclick="renderAllOnPage()">← Back to questions</button>')
-    + '<button class="btn green" onclick="confirmSubmit()">Submit assessment</button>'
+    + '<button class="btn green" onclick="confirmSubmit()">Submit</button>'
     + '</div>'
     + '</div>');
 }
@@ -448,7 +498,7 @@ function tagPill(color, txt) {
 
 function confirmSubmit() {
   showModal({
-    title: "Submit assessment?",
+    title: "Submit?",
     body: '<p>Once you submit you cannot change your answers. Are you ready?</p>',
     confirm: "Yes, submit",
     onConfirm: function () { closeModal(); doSubmit(); }
@@ -459,6 +509,8 @@ function confirmSubmit() {
 function doSubmit() {
   stopTimer();
   showLoader("Submitting your answers...");
+  // The SERVER scores this. We only send the chosen option numbers; the browser
+  // never learns which were correct.
   db.rpc("submit_assessment", { p_respondent_id: TAKE.respondentId, p_answers: TAKE.answers }).then(function (res) {
     if (res.error) {
       hideLoader();
@@ -485,7 +537,7 @@ function loadResult() {
     hideLoader();
     if (res.error) { render(noticeCard("Submitted", "Your answers were submitted, but we could not load the result page.", "ok")); return; }
     var r = res.data;
-    if (r.assessment_type === "wpca") { renderWpcaThanks(r); return; }
+    if (r.assessment_type === "wpca") { renderWpcaThanks(r); return; }   // 360 stays confidential
     if (!r.show_results) { renderThankYou(r); return; }
     renderResult(r);
   });
@@ -495,7 +547,7 @@ function renderWpcaThanks(r) {
   render('<div class="player-wrap"><div class="card pad" style="text-align:center;padding:46px">'
     + '<div style="font-size:46px">✓</div>'
     + '<h1 style="margin:12px 0 6px">Thank you</h1>'
-    + '<p class="muted">Your 360 review has been recorded. Individual responses are kept confidential and are only used in the combined report.</p>'
+    + '<p class="muted">Your WPCAS review has been recorded. Individual responses are kept confidential and are only used in the combined report.</p>'
     + '</div></div>');
 }
 function renderThankYou(r) {
@@ -549,7 +601,9 @@ function renderResult(r) {
     + '</div>');
 }
 
-// one row of the per-question breakdown, showing the chosen and correct options
+// one row of the per-question breakdown, showing the chosen and correct options.
+// note: the answer key is only present here AFTER submission, returned by the
+// server in get_respondent_result - never before the attempt is finished.
 function breakdownRow(b) {
   var opts = [b.opt1, b.opt2, b.opt3, b.opt4, b.opt5];
   var sel = b.selected || [];
@@ -593,7 +647,6 @@ function downloadPdf() {
     var imgW = pageW;
     var imgH = (canvas.height * imgW) / canvas.width;
     var img = canvas.toDataURL("image/png");
-    var y = 0;
     // paginate the tall image across A4 pages
     var remaining = imgH;
     var position = 0;
@@ -657,7 +710,8 @@ function timerHtml() {
 
 // ---------------------------------------------------------------- security / anti-cheat
 // These never terminate the attempt. After three events we show a banner so the
-// respondent knows the activity was noticed. Everything is logged on the server.
+// respondent knows the activity was noticed. Everything is logged on the server
+// via log_security_event (an anon-callable SECURITY DEFINER RPC).
 function startSecurity() {
   TAKE.secActive = true;
   document.addEventListener("visibilitychange", onVisibility);
@@ -722,7 +776,7 @@ function exitFullscreen() {
 // ---------------------------------------------------------------- shared markup bits
 function watermarkHtml() {
   if (!TAKE.watermark) return "";
-  // tile the faint name+email across the screen
+  // tile the faint name+email across the screen so screenshots are traceable
   var tiles = "";
   for (var r = 0; r < 6; r++) {
     for (var c = 0; c < 4; c++) {
@@ -738,6 +792,8 @@ function flagBannerHtml() {
 }
 
 // ---------------------------------------------------------------- small utilities
+// shuffle is local to this page (not shared). readLS/writeLS/removeLS/onReady and
+// the esc* / toast / modal helpers all come from common.js.
 function shuffle(arr) {
   var a = arr.slice();
   for (var i = a.length - 1; i > 0; i--) {
@@ -745,13 +801,4 @@ function shuffle(arr) {
     var t = a[i]; a[i] = a[j]; a[j] = t;
   }
   return a;
-}
-function readLS(key) { try { var v = localStorage.getItem(key); return v ? JSON.parse(v) : null; } catch (e) { return null; } }
-function writeLS(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch (e) {} }
-function removeLS(key) { try { localStorage.removeItem(key); } catch (e) {} }
-
-// run fn once the DOM is ready, even if that already happened
-function onReady(fn) {
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", fn);
-  else fn();
 }
