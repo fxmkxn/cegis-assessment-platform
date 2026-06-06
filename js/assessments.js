@@ -67,13 +67,15 @@ function _splitComp(v){
 function _normToken(v){
   return String(v == null ? '' : v).trim().toLowerCase().replace(/[\s_\-]+/g, '');
 }
-// resolve the cohort currently selected in the context bar (set by db.js)
+// resolve the cohort currently selected in the context bar.
+// Matches Phase 6 credentials.js: the #cohortSel option VALUE is the cohort uuid.
 function currentCohortId(){
+  const sel = document.getElementById('cohortSel');
+  if (sel && sel.value) return sel.value;                       // primary: same source Phase 6 uses
   if (typeof window.getCurrentCohortId === 'function') return window.getCurrentCohortId();
   if (window.CURRENT_COHORT_ID) return window.CURRENT_COHORT_ID;
   if (typeof state === 'object' && state && state.cohortId) return state.cohortId;
-  const sel = document.getElementById('cohortSel');
-  if (sel && sel.selectedOptions && sel.selectedOptions[0])
+  if (sel && sel.selectedOptions && sel.selectedOptions[0])     // last resort: a data-id attr
     return sel.selectedOptions[0].dataset.id || null;
   return null;
 }
@@ -408,7 +410,7 @@ async function asmtDoDeploy(){
       p_kind: A.kind,
       p_stage: A.stage,
       p_questions: payload,
-      p_file_path: null,
+      p_file_path: A.fileName || 'inline',   // raw-file upload is a later/optional phase
       p_column_map: A.map || null,
       p_row_count: A.rowCount || payload.length
     });
