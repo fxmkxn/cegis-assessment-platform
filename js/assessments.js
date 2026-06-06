@@ -371,9 +371,15 @@ function asmtDeployView(A){
       <input type="date" class="cohort-sel" value="${A.opensAt}" onchange="state.asmt.opensAt=this.value"></div>
     <div class="kv ac"><span class="muted">Closes</span>
       <input type="date" class="cohort-sel" value="${A.closesAt}" onchange="state.asmt.closesAt=this.value"></div>
+    <div class="kv ac"><span class="muted">Time limit</span>
+      <span class="flex ac g8"><input type="number" min="1" class="cohort-sel" style="width:90px" placeholder="none"
+        value="${A.timeLimit||''}" oninput="state.asmt.timeLimit=this.value"> <span class="muted small">minutes (blank = untimed)</span></span></div>
     <div class="kv ac"><span class="muted">Release</span>
       <select class="cohort-sel" onchange="state.asmt.deployStatus=this.value">
         <option value="live">Live now</option><option value="scheduled">Scheduled (opens on date)</option></select></div>
+    <div class="kv ac"><span class="muted">Auto-submit if the participant leaves the tab</span>
+      <input type="checkbox" ${A.proctored!==false?'checked':''} onchange="state.asmt.proctored=this.checked"
+             style="width:18px;height:18px"></div>
     <div class="flex g12" style="margin-top:18px">
       <button class="btn ghost" onclick="state.asmt.step=2;renderAdmin()">← Back</button>
       <button class="btn" onclick="asmtConfirmDeploy()">Deploy to cohort</button></div>
@@ -418,11 +424,14 @@ async function asmtDoDeploy(){
     const assessmentId = imp.assessment_id;
 
     const status = A.deployStatus || 'live';
+    const tl = parseInt(A.timeLimit, 10);
     const { error: depErr } = await sb.rpc('deploy_assessment', {
       p_assessment_id: assessmentId,
       p_opens_at: A.opensAt ? new Date(A.opensAt).toISOString() : null,
       p_closes_at: A.closesAt ? new Date(A.closesAt).toISOString() : null,
-      p_status: status
+      p_status: status,
+      p_time_limit_minutes: Number.isFinite(tl) && tl > 0 ? tl : null,
+      p_proctored: A.proctored !== false
     });
     if (depErr){
       toast('Imported as draft, but deploy failed: ' + depErr.message, 'err');
