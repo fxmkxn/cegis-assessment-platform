@@ -282,7 +282,7 @@ function vRoster(){
 
   return `<div class="crumb">Manage / Cohorts</div>
     <div class="page-head"><h1>Cohorts &amp; Roster</h1>
-      <button class="btn ghost" onclick="createCohortPrompt()">＋ New cohort</button></div>
+      <div class="flex g12 ac"><button class="btn" onclick="generateCredentialsForCurrentCohort()">Generate credentials</button><button class="btn ghost" onclick="createCohortPrompt()">＋ New cohort</button></div></div>
     ${hasCohort ? `${dz}
       <div class="flex jb ac" style="margin:16px 0 10px"><h3>Participants</h3>
         <span class="badge ${DATA_SOURCE==='supabase'?'ok':'warn'}">${src}</span></div>
