@@ -11,8 +11,8 @@
    Supabase Dashboard → Project Settings → API
    ============================================================ */
 window.CONFIG = {
-  SUPABASE_URL: 'https://lmjivbgakpmvubodopju.supabase.co',
-  SUPABASE_ANON_KEY: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imxtaml2Ymdha3BtdnVib2RvcGp1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2NDA5NzYsImV4cCI6MjA5NjIxNjk3Nn0.uENFe_mVRLpj5c593AZ5isHddhIH-xGtrxlVkG3fpZ8',
+  SUPABASE_URL: 'https://YOUR_PROJECT_REF.supabase.co',
+  SUPABASE_ANON_KEY: 'YOUR_SUPABASE_ANON_KEY',
 
   // Edge Function names (paths are derived from SUPABASE_URL at call time:
   //   `${SUPABASE_URL}/functions/v1/<name>`). Wired up in later phases.
