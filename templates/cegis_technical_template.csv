@@ -1,0 +1,4 @@
+qno,competency,level,qtype,marks,ques,opt1,opt2,opt3,opt4,opt5,isopt1correct,isopt2correct,isopt3correct,isopt4correct,isopt5correct
+1,Statistics,Foundational,mcqsca,1,"Which measure is most robust to outliers?",Mean,Median,Mode,Range,,FALSE,TRUE,FALSE,FALSE,
+2,Statistical reasoning,Foundational,tf,1,"Correlation implies causation.",True,False,,,,FALSE,TRUE,,,
+3,Statistics,Intermediate,mcqmca,2,"Select all measures of spread.",Variance,Std deviation,Median,Range,,TRUE,TRUE,FALSE,TRUE,
