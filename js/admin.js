@@ -255,7 +255,7 @@ const qRow=(t,s,p)=>`<div style="padding:10px 0;border-bottom:1px solid var(--g1
 
 /* === Roster === */
 function vRoster(){
-  const authed = !!(window.AUTH && AUTH.session && !AUTH.demo);
+  const authed = !!(typeof AUTH !== 'undefined' && AUTH.session && !AUTH.demo);
   if(authed && state.rosterPreview) return vRosterPreview();
 
   const rows=ROSTER.map(r=>`<tr><td><b>${r.n}</b></td><td class="muted small">${r.id}</td>

@@ -9,6 +9,8 @@
 //     the custom_access_token_hook), never from a manual toggle.
 
 let AUTH = { demo: false, session: null, user: null, orgId: null, role: null };
+// also expose on window so code in other modules can reference it either way
+window.AUTH = AUTH;
 
 // Decode a JWT payload (base64url) so we read EXACTLY the claims the
 // access-token hook produced, rather than trusting a cached user object.
