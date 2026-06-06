@@ -1,21 +1,32 @@
 /* =====================================================================
- * CEGIS — js/player.js  (Phase 8)
+ * CEGIS — js/player.js  (Phase 8, + persistent navigator rail)
  *
- * The participant assessment player. Consumes a deployed technical
- * assessment via the Phase-8 RPCs:
- *   list_player_assessments · start_player_assessment · save_response ·
- *   record_proctor_event · submit_attempt
+ * Participant assessment player. Consumes a deployed technical assessment
+ * via the Phase-8 RPCs. Features: live load + resume, per-answer autosave,
+ * flag-for-review, a PERSISTENT right-rail question navigator (always shows
+ * answered / unanswered / flagged), a large countdown that auto-submits at
+ * zero, proctoring (tab/window-switch auto-submit + copy/paste/devtools
+ * blocking + nav guard + best-effort full screen), and server-side scoring.
+ * The score is never shown.
  *
- * Features: live load + resume, per-answer autosave with the saving/saved
- * indicator, flag-for-review, an always-live review grid, a per-assessment
- * countdown that AUTO-SUBMITS at zero, and proctoring that AUTO-SUBMITS on
- * tab/window switch (plus copy/paste/context-menu/devtools blocking and a
- * navigation guard). The score is computed server-side and NEVER shown.
- *
- * Loaded AFTER participant.js so it overrides the prototype's player stubs.
- * Globals from earlier phases: sb, state, mountOctopus, toast,
- * showModal/closeModal, renderParticipant, pgo.
+ * Load AFTER participant.js. Globals: sb, state, layout, mountOctopus,
+ * toast, showModal/closeModal, renderParticipant, pgo, ME, initials.
  * ===================================================================== */
+
+/* ---------------- one-time CSS (timer size + two-column layout) ---------------- */
+function ensurePlayerStyles(){
+  if (document.getElementById('playerStyles')) return;
+  const s = document.createElement('style');
+  s.id = 'playerStyles';
+  s.textContent = `
+    #playerTimer{font-size:22px;padding:8px 18px;font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:.5px}
+    .player-grid{display:grid;grid-template-columns:1fr 250px;gap:24px;max-width:1060px;margin:0 auto;align-items:start}
+    .nav-rail{position:sticky;top:6px}
+    .nav-rail .review-grid{grid-template-columns:repeat(auto-fill,minmax(38px,1fr))}
+    @media(max-width:860px){.player-grid{grid-template-columns:1fr}.nav-rail{position:static}}
+  `;
+  document.head.appendChild(s);
+}
 
 /* ---------------- Tasks list (live) ---------------- */
 function pTasks(){
@@ -52,14 +63,13 @@ function loadMyTasks(){
     if (state.ptab === 'tasks') renderParticipant();
   });
 }
-function playerLoading(msg){
-  return `<div class="oct-loading"><div class="oct-msg">${msg}</div></div>`;
-}
+function playerLoading(msg){ return `<div class="oct-loading"><div class="oct-msg">${msg}</div></div>`; }
 
 /* ---------------- Start / resume an attempt ---------------- */
-function startPlayer(){ /* legacy entry: route through tasks */ pgo('tasks'); }
+function startPlayer(){ pgo('tasks'); }
 
 async function startPlayerForAssessment(assessmentId){
+  ensurePlayerStyles();
   state.ptab = 'player';
   layout.innerHTML = `<div style="flex:1;display:flex;flex-direction:column;min-height:0"><div class="main"></div></div>`;
   mountOctopus(document.querySelector('.main'), 'Loading your assessment…');
@@ -76,7 +86,7 @@ async function startPlayerForAssessment(assessmentId){
     state.player = {
       assessmentId, attemptId: data.attempt.id, name: data.assessment.name,
       questions: data.questions || [], answers: ans, flags,
-      idx: 0, inReview: false, submitted: false, saveState: 'saved',
+      idx: 0, submitted: false, saveState: 'saved',
       deadlineAt: data.attempt.deadline_at ? new Date(data.attempt.deadline_at).getTime() : null,
       skewMs, dirty: {}, terminated: false, fsActive: false,
       proctored: data.assessment.proctored !== false
@@ -84,44 +94,49 @@ async function startPlayerForAssessment(assessmentId){
     if (state.player.proctored) attachProctoring();
     startTimer();
     renderParticipant();
+    tickTimer();
   } catch (e){
     toast('Could not start assessment: ' + (e.message || e), 'err');
     state.tasks = undefined; pgo('tasks');
   }
 }
 
-/* ---------------- Player render ---------------- */
+/* ---------------- Player render (two columns: question | navigator) ---------------- */
+function answeredOf(q){ const a = state.player.answers[q.id]; return !!(a && ((a.selected && a.selected.length) || (a.text && a.text.trim() !== ''))); }
+
 function pPlayer(){
   const P = state.player;
   if (!P) { pgo('tasks'); return ''; }
   if (P.submitted) return playerDone();
-  if (P.inReview) return playerReview();
+  ensurePlayerStyles();
   const q = P.questions[P.idx], total = P.questions.length;
   const flagged = !!P.flags[q.id];
   const ind = { saved:['','Saved'], saving:['saving','Saving…'], err:['err','Couldn’t save — retrying'] }[P.saveState] || ['','Saved'];
   const typeLabel = q.type==='fib'?'Fill in the blank':q.type==='tf'?'True / False':q.type==='multi'?'Select all that apply':q.type==='likert'?'Rating':'Multiple choice';
-  return `<div class="player-wrap">
-    <div class="flex jb ac" style="margin-bottom:14px">
+  return `<div>
+    <div class="flex jb ac" style="margin-bottom:16px">
       <button class="btn ghost sm" onclick="exitPlayer()">✕ Save & exit</button>
       <div class="flex g12 ac">
-        ${P.deadlineAt ? `<span class="pill sched" id="playerTimer">--:--</span>` : ''}
+        ${P.deadlineAt ? timerSpan() : ''}
         <span class="pill sched">${P.name}</span></div></div>
-    <div class="player-top">
-      <span class="small tnum" style="font-weight:600;white-space:nowrap">Question ${P.idx+1} of ${total}</span>
-      <div class="qbar"><i style="width:${(P.idx+1)/total*100}%"></i></div>
-      <div class="save-ind ${ind[0]}"><span class="d"></span>${ind[1]}</div></div>
-    <div class="card pad" id="qArea" style="margin-top:18px">
-      <span class="tag">${typeLabel}</span>
-      <p style="font-size:17px;font-weight:600;margin:14px 0 18px;line-height:1.45">${q.prompt}</p>
-      ${playerControls(q)}</div>
-    <div class="flex jb ac" style="margin-top:18px">
-      <button class="flagbtn ${flagged?'on':''}" onclick="playerFlag('${q.id}')">${flagged?'⚑ Flagged':'⚐ Flag for review'}</button>
-      <div class="flex g12">
-        <button class="btn ghost" onclick="playerNav(-1)" ${P.idx===0?'disabled':''}>← Previous</button>
-        ${P.idx===total-1
-          ? '<button class="btn" onclick="playerEnterReview()">Review answers →</button>'
-          : '<button class="btn" onclick="playerNav(1)">Next →</button>'}</div></div>
-  </div>`;
+    <div class="player-grid">
+      <div>
+        <div class="player-top">
+          <span class="small tnum" style="font-weight:600;white-space:nowrap">Question ${P.idx+1} of ${total}</span>
+          <div class="qbar"><i style="width:${(P.idx+1)/total*100}%"></i></div>
+          <div class="save-ind ${ind[0]}"><span class="d"></span>${ind[1]}</div></div>
+        <div class="card pad" id="qArea" style="margin-top:18px">
+          <span class="tag">${typeLabel}</span>
+          <p style="font-size:17px;font-weight:600;margin:14px 0 18px;line-height:1.45">${q.prompt}</p>
+          ${playerControls(q)}</div>
+        <div class="flex jb ac" style="margin-top:18px">
+          <button class="flagbtn ${flagged?'on':''}" id="flagBtn" onclick="playerFlag('${q.id}')">${flagged?'⚑ Flagged':'⚐ Flag for review'}</button>
+          <div class="flex g12">
+            <button class="btn ghost" onclick="playerNav(-1)" ${P.idx===0?'disabled':''}>← Previous</button>
+            <button class="btn ghost" onclick="playerNav(1)" ${P.idx===total-1?'disabled':''}>Next →</button></div></div>
+      </div>
+      <div class="nav-rail" id="navRail">${navInner()}</div>
+    </div></div>`;
 }
 
 function playerControls(q){
@@ -136,22 +151,61 @@ function playerControls(q){
     return `<div class="likert">`+q.options.map(o=>`<button class="${isSel(o.ordinal)?'sel':''}" onclick="playerPick('${q.id}',${o.ordinal})">${o.label}</button>`).join('')+`</div>`;
   if (q.type === 'multi')
     return `<div>`+q.options.map(o=>`<div class="opt ${isSel(o.ordinal)?'sel':''}" onclick="playerToggle('${q.id}',${o.ordinal})"><span class="rd"></span>${o.label}</div>`).join('')+`</div>`;
-  // mcq (single)
   return `<div>`+q.options.map(o=>`<div class="opt ${isSel(o.ordinal)?'sel':''}" onclick="playerPick('${q.id}',${o.ordinal})"><span class="rd"></span>${o.label}</div>`).join('')+`</div>`;
 }
 
-/* ---------------- Answer handlers + autosave ---------------- */
-function playerPick(qid, ord){ state.player.answers[qid] = { selected:[ord] }; queueSave(qid); renderParticipant(); }
+/* navigator rail content (recomputed on every answer/flag, NOT a full re-render) */
+function navInner(){
+  const P = state.player, total = P.questions.length;
+  const answered = P.questions.filter(answeredOf).length;
+  const flagged  = P.questions.filter(q => P.flags[q.id]).length;
+  const cells = P.questions.map((q,i)=>{
+    const a = answeredOf(q), f = !!P.flags[q.id], cur = i === P.idx;
+    return `<div id="rcell-${q.id}" class="rcell ${a?'ans':''} ${f?'flag':''}"
+      style="${cur?'outline:2px solid var(--indigo);outline-offset:1px':''}"
+      onclick="playerGoto(${i})" title="Question ${q.ordinal}">${q.ordinal}</div>`;
+  }).join('');
+  return `<div class="card pad">
+    <h3 style="font-size:14px;margin-bottom:2px">Question navigator</h3>
+    <div class="muted small" style="margin-bottom:12px">${answered}/${total} answered · ${flagged} flagged</div>
+    <div class="review-grid">${cells}</div>
+    <div class="legend" style="margin-top:14px;flex-direction:column;gap:6px">
+      <span><i style="background:var(--indigo-l);border:1.5px solid var(--indigo);width:12px;height:12px;border-radius:3px"></i>Answered</span>
+      <span><i style="background:#fff;border:1.5px solid var(--g300);width:12px;height:12px;border-radius:3px"></i>Unanswered</span>
+      <span><i style="background:var(--warn-l);border:1.5px solid var(--warn);width:12px;height:12px;border-radius:3px"></i>Flagged</span></div>
+    <button class="btn" style="width:100%;margin-top:16px" onclick="playerConfirmSubmit(${answered},${total})">Submit assessment</button>
+  </div>`;
+}
+function refreshNav(){ const el = document.getElementById('navRail'); if (el) el.innerHTML = navInner(); }
+
+/* ---------------- Answer handlers (in-place; the timer is never disturbed) ---------------- */
+function playerPick(qid, ord){ state.player.answers[qid] = { selected:[ord] }; queueSave(qid); paintChoices(qid); refreshNav(); }
 function playerToggle(qid, ord){
   const a = state.player.answers[qid] || { selected:[] };
   const s = new Set(a.selected || []);
   if (s.has(ord)) s.delete(ord); else s.add(ord);
   state.player.answers[qid] = { selected:[...s].sort((x,y)=>x-y) };
-  queueSave(qid); renderParticipant();
+  queueSave(qid); paintChoices(qid); refreshNav();
 }
-function playerText(qid, v){ state.player.answers[qid] = { text: v }; queueSave(qid); }
-function playerFlag(qid){ state.player.flags[qid] = !state.player.flags[qid]; queueSave(qid); renderParticipant(); }
+function playerText(qid, v){ state.player.answers[qid] = { text: v }; queueSave(qid); refreshNav(); }
+function playerFlag(qid){
+  state.player.flags[qid] = !state.player.flags[qid]; queueSave(qid);
+  const on = !!state.player.flags[qid];
+  const btn = document.getElementById('flagBtn');
+  if (btn){ btn.className = 'flagbtn ' + (on ? 'on' : ''); btn.textContent = on ? '⚑ Flagged' : '⚐ Flag for review'; }
+  refreshNav();
+}
+// repaint only the current question's option highlights — keeps the timer steady (no flicker)
+function paintChoices(qid){
+  const P = state.player; const q = P && P.questions[P.idx];
+  if (!q || q.id !== qid) return;
+  const sel = (P.answers[qid] && P.answers[qid].selected) || [];
+  const area = document.getElementById('qArea'); if (!area) return;
+  const nodes = area.querySelectorAll('.opt, .tf button, .likert button');
+  q.options.forEach((o, i) => { const n = nodes[i]; if (n) n.classList.toggle('sel', sel.indexOf(o.ordinal) !== -1); });
+}
 
+/* ---------------- Autosave ---------------- */
 let _saveTimer;
 function queueSave(qid){
   const P = state.player; if (!P || P.terminated) return;
@@ -174,9 +228,8 @@ async function flushSaves(){
     P.saveState = 'saved';
   } catch (e){
     P.saveState = 'err';
-    // if the server says time is up, finalize
     if (String(e.message||e).toLowerCase().includes('time is up')){ autoSubmit('time'); return; }
-    ids.forEach(id => P.dirty[id] = true);     // re-queue for retry
+    ids.forEach(id => P.dirty[id] = true);
     clearTimeout(_saveTimer); _saveTimer = setTimeout(flushSaves, 1500);
   }
   updateSaveIndicator();
@@ -190,36 +243,19 @@ function updateSaveIndicator(){
   el.innerHTML = `<span class="d"></span>${txt}`;
 }
 
-/* ---------------- Nav + review ---------------- */
+/* ---------------- Navigation ---------------- */
 function playerNav(d){
   const P = state.player; P.idx = Math.max(0, Math.min(P.questions.length-1, P.idx+d));
-  renderParticipant(); const m = document.querySelector('.main'); if (m) m.scrollTo(0,0);
+  renderParticipant(); tickTimer();
+  const m = document.querySelector('.main'); if (m) m.scrollTo(0,0);
 }
-function playerEnterReview(){ state.player.inReview = true; renderParticipant(); }
-
-function playerReview(){
-  const P = state.player, total = P.questions.length;
-  const answeredOf = q => { const a = P.answers[q.id]; return a && ((a.selected && a.selected.length) || (a.text && a.text.trim() !== '')); };
-  const answered = P.questions.filter(answeredOf).length;
-  const cells = P.questions.map((q,i)=>{
-    const a = answeredOf(q), f = P.flags[q.id];
-    return `<div class="rcell ${a?'ans':''} ${f?'flag':''}" onclick="state.player.inReview=false;state.player.idx=${i};renderParticipant()">${q.ordinal}</div>`;
-  }).join('');
-  return `<div class="player-wrap">
-    <div class="flex jb ac" style="margin-bottom:10px">
-      <h1>Review your answers</h1>
-      ${P.deadlineAt ? `<span class="pill sched" id="playerTimer">--:--</span>` : ''}</div>
-    <p class="muted" style="margin-bottom:18px">${answered} of ${total} answered${answered<total?` · ${total-answered} unanswered`:''}. Tap any number to jump back.</p>
-    <div class="card pad"><div class="review-grid">${cells}</div>
-      <div class="legend" style="margin-top:16px">
-        <span><i style="background:var(--indigo);width:12px;height:12px;border-radius:3px"></i>Answered</span>
-        <span><i style="background:#fff;border:1.5px solid var(--g300);width:12px;height:12px;border-radius:3px"></i>Unanswered</span>
-        <span><i style="background:var(--warn-l);border:1.5px solid var(--warn);width:12px;height:12px;border-radius:3px"></i>Flagged</span></div></div>
-    <div class="flex jb" style="margin-top:18px">
-      <button class="btn ghost" onclick="state.player.inReview=false;renderParticipant()">← Back to questions</button>
-      <button class="btn" onclick="playerConfirmSubmit(${answered},${total})">Submit assessment</button></div></div>`;
+function playerGoto(i){
+  state.player.idx = Math.max(0, Math.min(state.player.questions.length-1, i));
+  renderParticipant(); tickTimer();
+  const m = document.querySelector('.main'); if (m) m.scrollTo(0,0);
 }
 
+/* ---------------- Submit ---------------- */
 function playerConfirmSubmit(answered,total){
   showModal({
     title:'Submit this assessment?',
@@ -230,7 +266,6 @@ function playerConfirmSubmit(answered,total){
     onConfirm: () => { closeModal(); submitNow('manual'); }
   });
 }
-
 async function submitNow(reason){
   const P = state.player; if (!P || P.terminated) return; P.terminated = true;
   detachProctoring(); stopTimer();
@@ -243,15 +278,12 @@ async function submitNow(reason){
   } catch (e){ toast('Submit error: ' + (e.message||e), 'err'); }
   P.submitted = true; state.tasks = undefined; renderParticipant();
 }
-
-/* auto-submit (timeout / proctoring) — no confirmation */
 function autoSubmit(reason){
   const P = state.player; if (!P || P.terminated) return;
   submitNow(reason);
   const labels = { time:'time expired', tab_switch:'you left the tab', window_blur:'you left the window', fullscreen_exit:'you exited full screen' };
   toast('Assessment auto-submitted — ' + (labels[reason]||reason), 'err');
 }
-
 function playerDone(){
   return `<div class="player-wrap" style="text-align:center;padding-top:40px">
     <div style="font-size:54px">✅</div>
@@ -261,48 +293,46 @@ function playerDone(){
 }
 function exitPlayer(){
   const P = state.player; if (P){ P.terminated = true; }
-  detachProctoring(); stopTimer();
-  flushSaves();
-  toast('Progress saved', 'ok');
-  leavePlayer();
+  detachProctoring(); stopTimer(); flushSaves();
+  toast('Progress saved', 'ok'); leavePlayer();
 }
 function leavePlayer(){ state.player = null; state.tasks = undefined; pgo('tasks'); }
 
-/* ---------------- Countdown timer ---------------- */
+/* ---------------- Countdown timer (large; updated text-only, never re-rendered on answer) ---------------- */
 let _timerInt;
-function startTimer(){
-  stopTimer();
-  if (!state.player || !state.player.deadlineAt) return;
-  _timerInt = setInterval(tickTimer, 1000);
-  tickTimer();
+function timerText(){
+  const P = state.player; if (!P || !P.deadlineAt) return '--:--';
+  let r = Math.round((P.deadlineAt - (Date.now()+(P.skewMs||0)))/1000); if (r < 0) r = 0;
+  return `${Math.floor(r/60)}:${String(r%60).padStart(2,'0')}`;
 }
+function timerSpan(){
+  const P = state.player;
+  const low = P && P.deadlineAt && (P.deadlineAt - (Date.now()+(P.skewMs||0)))/1000 <= 60;
+  const danger = low ? 'background:var(--err-l);color:var(--err);' : '';
+  return `<span class="pill sched" id="playerTimer" style="${danger}">${timerText()}</span>`;
+}
+function startTimer(){ stopTimer(); if (!state.player || !state.player.deadlineAt) return; _timerInt = setInterval(tickTimer, 1000); tickTimer(); }
 function stopTimer(){ if (_timerInt){ clearInterval(_timerInt); _timerInt = null; } }
 function tickTimer(){
   const P = state.player; if (!P || P.terminated || !P.deadlineAt){ stopTimer(); return; }
-  const serverNow = Date.now() + (P.skewMs || 0);
-  let remain = Math.round((P.deadlineAt - serverNow) / 1000);
+  let remain = Math.round((P.deadlineAt - (Date.now() + (P.skewMs||0))) / 1000);
   if (remain <= 0){ stopTimer(); autoSubmit('time'); return; }
   const el = document.getElementById('playerTimer'); if (!el) return;
-  const m = Math.floor(remain/60), s = remain % 60;
-  el.textContent = `${m}:${String(s).padStart(2,'0')}`;
+  el.textContent = `${Math.floor(remain/60)}:${String(remain%60).padStart(2,'0')}`;
   el.style.background = remain <= 60 ? 'var(--err-l)' : '';
   el.style.color = remain <= 60 ? 'var(--err)' : '';
 }
 
 /* ---------------- Proctoring ---------------- */
 let _proctor = {};
-function proctorLog(ev){
-  const P = state.player; if (!P) return;
-  try { sb.rpc('record_proctor_event', { p_attempt_id: P.attemptId, p_event: ev }); } catch(e){}
-}
+function proctorLog(ev){ const P = state.player; if (!P) return; try { sb.rpc('record_proctor_event', { p_attempt_id: P.attemptId, p_event: ev }); } catch(e){} }
 function attachProctoring(){
   const P = state.player; if (!P) return;
-
   _proctor.vis = () => { if (document.hidden && !P.terminated){ autoSubmit('tab_switch'); } };
   _proctor.blur = () => { setTimeout(() => { if (!P.terminated && !document.hasFocus() && !document.hidden){ autoSubmit('window_blur'); } }, 200); };
   _proctor.block = e => { e.preventDefault(); proctorLog(e.type); toast('That action is disabled during the assessment','err'); };
   _proctor.keys = e => {
-    const k = e.key.toLowerCase();
+    const k = (e.key||'').toLowerCase();
     const blocked = e.key === 'F12'
       || ((e.ctrlKey||e.metaKey) && e.shiftKey && ['i','j','c'].includes(k))
       || ((e.ctrlKey||e.metaKey) && ['c','v','x','p','u','s'].includes(k))
@@ -310,12 +340,7 @@ function attachProctoring(){
     if (blocked){ e.preventDefault(); proctorLog('key:'+k); }
   };
   _proctor.beforeunload = e => { if (!P.terminated){ e.preventDefault(); e.returnValue = ''; proctorLog('nav_attempt'); } };
-  _proctor.fs = () => {
-    const inFs = !!(document.fullscreenElement);
-    if (inFs) P.fsActive = true;
-    else if (P.fsActive && !P.terminated){ autoSubmit('fullscreen_exit'); }
-  };
-
+  _proctor.fs = () => { const inFs = !!document.fullscreenElement; if (inFs) P.fsActive = true; else if (P.fsActive && !P.terminated){ autoSubmit('fullscreen_exit'); } };
   document.addEventListener('visibilitychange', _proctor.vis);
   window.addEventListener('blur', _proctor.blur);
   document.addEventListener('contextmenu', _proctor.block);
@@ -325,8 +350,6 @@ function attachProctoring(){
   document.addEventListener('keydown', _proctor.keys, true);
   window.addEventListener('beforeunload', _proctor.beforeunload);
   document.addEventListener('fullscreenchange', _proctor.fs);
-
-  // best-effort full screen (granted by the Begin click gesture)
   const el = document.documentElement;
   if (el.requestFullscreen){ el.requestFullscreen().then(()=>{ P.fsActive = true; }).catch(()=>{}); }
 }
