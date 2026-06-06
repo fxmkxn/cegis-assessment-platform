@@ -7,7 +7,8 @@ const layout = document.getElementById('layout');
 let state = { role:'admin', view:'dashboard', ptab:'tasks',
   uploadStep:0, parsed:false,
   pidx:0, answers:{}, flags:{}, playerStage:'EoCA 2', inReview:false, submitted:false, saveState:'saved',
-  reportSection:'summary' };
+  reportSection:'summary',
+  cohortId:null, rosterPreview:null };
 
 function render(){
   document.getElementById('contextBar').style.display = state.role==='admin'?'':'none';

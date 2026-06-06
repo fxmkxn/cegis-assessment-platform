@@ -246,14 +246,65 @@ const qRow=(t,s,p)=>`<div style="padding:10px 0;border-bottom:1px solid var(--g1
   <div class="flex jb"><b style="font-size:13px">${t}</b><span class="muted small">${s}</span></div>
   <div class="bar" style="margin:7px 0 0"><i style="width:${p}%"></i></div></div>`;
 
-/* === Roster (reads straight from the loaded file) === */
+/* === Roster === */
 function vRoster(){
+  const authed = !!(window.AUTH && AUTH.session && !AUTH.demo);
+  if(authed && state.rosterPreview) return vRosterPreview();
+
   const rows=ROSTER.map(r=>`<tr><td><b>${r.n}</b></td><td class="muted small">${r.id}</td>
-    <td>${r.des||'—'}</td><td>${r.ws?`<span class="tag">${r.ws}</span>`:'—'}</td><td>${r.loc||'—'}</td><td>${r.mgr?nameOf(r.mgr):'—'}</td></tr>`).join('');
-  return `<div class="crumb">Manage / Cohorts</div><div class="page-head"><h1>Cohorts &amp; Roster</h1>
-    <span class="badge ${DATA_SOURCE==='file'?'ok':'warn'}">${DATA_SOURCE==='file'?'✓ '+ROSTER.length+' loaded from file':'sample data'}</span></div>
-    <div class="card"><div style="overflow:auto"><table><thead><tr><th>Name</th><th>ID</th><th>Designation</th><th>Workstream</th><th>Location</th><th>Reporting manager</th></tr></thead>
+    <td>${r.des||'—'}</td><td>${r.ws?`<span class="tag">${r.ws}</span>`:'—'}</td><td>${r.loc||'—'}</td><td>${r.mgr?nameOf(r.mgr):'—'}</td></tr>`).join('')
+    || '<tr><td colspan="6" class="muted" style="padding:18px">No participants yet.</td></tr>';
+  const table=`<div class="card"><div style="overflow:auto"><table><thead><tr><th>Name</th><th>ID</th><th>Designation</th><th>Workstream</th><th>Location</th><th>Reporting manager</th></tr></thead>
     <tbody>${rows}</tbody></table></div></div>`;
+
+  if(!authed){
+    // demo / sample mode (prototype behavior)
+    return `<div class="crumb">Manage / Cohorts</div><div class="page-head"><h1>Cohorts &amp; Roster</h1>
+      <span class="badge ${DATA_SOURCE==='file'?'ok':'warn'}">${DATA_SOURCE==='file'?'✓ '+ROSTER.length+' loaded from file':'sample data'}</span></div>${table}`;
+  }
+
+  // authenticated: live cohorts + roster upload (cohort switcher is the context bar)
+  const hasCohort = DB_COHORTS.length>0;
+  const src = DATA_SOURCE==='supabase'
+    ? `✓ ${ROSTER.length} loaded from Supabase` : 'no data';
+  const dz = `<div class="dz" onclick="document.getElementById('rosterFile').click()">
+    <input type="file" id="rosterFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="onRosterFile(event)">
+    <div style="font-size:30px">⤓</div>
+    <div style="font-weight:600;margin-top:6px">Upload roster for this cohort (.xlsx / .csv)</div>
+    <div class="muted small">Auto-mapped columns: name · email · designation · workstream · location · manager. Extra columns are preserved.</div></div>`;
+
+  return `<div class="crumb">Manage / Cohorts</div>
+    <div class="page-head"><h1>Cohorts &amp; Roster</h1>
+      <button class="btn ghost" onclick="createCohortPrompt()">＋ New cohort</button></div>
+    ${hasCohort ? `${dz}
+      <div class="flex jb ac" style="margin:16px 0 10px"><h3>Participants</h3>
+        <span class="badge ${DATA_SOURCE==='supabase'?'ok':'warn'}">${src}</span></div>
+      ${table}`
+    : `<div class="card pad"><p class="muted" style="margin:0">No cohorts yet. Create one to upload a roster — use <b>＋ New cohort</b> above.</p></div>`}`;
+}
+function vRosterPreview(){
+  const p=state.rosterPreview;
+  const valid=p.rows.filter(r=>r.email);
+  const noEmail=p.rows.length-valid.length;
+  const head=`<tr><th>Name</th><th>Email</th><th>Designation</th><th>Workstream</th><th>Location</th><th>Manager</th><th>Extra</th></tr>`;
+  const body=p.rows.slice(0,50).map(r=>`<tr>
+    <td><b>${r.name}</b></td>
+    <td class="muted small">${r.email||'<span class="badge err">missing</span>'}</td>
+    <td>${r.designation||'—'}</td><td>${r.workstream?`<span class="tag">${r.workstream}</span>`:'—'}</td>
+    <td>${r.location||'—'}</td><td>${r.manager||'—'}</td>
+    <td class="muted small">${Object.keys(r.extra||{}).length?Object.keys(r.extra).join(', '):'—'}</td></tr>`).join('');
+  const detected=Object.entries(p.columnMap).filter(([,v])=>v).map(([k,v])=>`${k}→${v}`).join(' · ')||'none detected';
+  const warn=p.warnings.length?`<div class="card pad" style="margin-bottom:12px"><span class="badge warn">⚠</span> ${p.warnings.join(' · ')}</div>`:'';
+  return `<div class="crumb">Cohorts / Import roster</div>
+    <div class="page-head"><h1>Preview — ${p.fileName}</h1></div>
+    ${warn}
+    <div class="card pad" style="margin-bottom:12px"><b>${valid.length}</b> importable${noEmail?` · <span style="color:var(--err)">${noEmail} without email will be skipped</span>`:''}.
+      <div class="muted small" style="margin-top:4px">Detected columns: ${detected}</div></div>
+    <div class="card"><div style="overflow:auto"><table><thead>${head}</thead><tbody>${body}</tbody></table></div></div>
+    ${p.rows.length>50?'<div class="muted small" style="text-align:center;margin:6px">…showing first 50 rows</div>':''}
+    <div class="flex g12" style="margin-top:16px;justify-content:flex-end">
+      <button class="btn ghost" onclick="cancelRosterPreview()">Cancel</button>
+      <button class="btn" onclick="confirmRosterImport()" ${valid.length?'':'disabled'}>Import ${valid.length} participants →</button></div>`;
 }
 function vSettings(){return `<div class="page-head"><h1>Settings</h1></div><div class="grid" style="grid-template-columns:1fr 1fr">
   ${['Users & admin roles','Competency framework / blueprints','Integrations · LLM API key','Audit log']

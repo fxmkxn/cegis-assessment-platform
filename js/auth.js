@@ -74,6 +74,8 @@ function routeAuth() {
        <button class="btn ghost sm" onclick="doLogout()">Sign out</button>`;
   }
   render();
+  // load live cohorts + roster from Supabase (replaces sample data), then re-render
+  if (AUTH.role === 'admin' && typeof initAdminData === 'function') initAdminData();
 }
 
 function _hideAppChrome() {
