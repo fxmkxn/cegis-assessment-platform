@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Assessment &amp; Training Analytics — CEGIS</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+
+<!-- CEGIS header: logo + title on the left, portal controls on the right -->
+<header class="site-header">
+  <img src="cegis_logo.png" alt="CEGIS" onerror="this.style.display='none'">
+  <div class="site-title">
+    <h1>Assessment &amp; Training Analytics</h1>
+    <p>Centre for Effective Governance of Indian States</p>
+  </div>
+  <div class="spacer"></div>
+  <div class="role-switch" id="roleSwitch">
+    <button data-role="admin" class="active">Admin</button>
+    <button data-role="participant">Participant</button>
+  </div>
+  <button class="ic-btn" title="Notifications">&#128276;</button>
+  <div class="avatar" id="userAv">AD</div>
+</header>
+
+<!-- global cohort selector (admin only) -->
+<div class="context-bar" id="contextBar">
+  <span class="muted small" style="font-weight:600">Cohort</span>
+  <select class="cohort-sel" id="cohortSel">
+    <option>Cohort 2026&middot;A — Personnel Management</option>
+  </select>
+</div>
+
+<div class="layout" id="layout">
+  <div class="main"></div>
+</div>
+
+<footer class="site-footer">
+  Designed and developed by the <a href="https://cegis.org" target="_blank" rel="noopener">CEGIS Foundation</a>
+  &nbsp;&middot;&nbsp; Assessment &amp; Training Analytics &nbsp;&middot;&nbsp; Prototype v0.1
+</footer>
+
+<div id="modalRoot"></div>
+<div id="toast"></div>
+
+  <!-- External libraries (pinned, loaded via CDN — no build step) -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+
+  <!-- Public config (Supabase URL + anon key — safe to ship; RLS is the real gate) -->
+  <script src="config.js"></script>
+  <script src="js/supabase-client.js"></script>
+
+  <!-- App modules (plain classic scripts, shared global scope; app.js boots last) -->
+  <script src="js/octopus.js"></script>
+  <script src="js/data.js"></script>
+  <script src="js/components.js"></script>
+  <script src="js/state.js"></script>
+  <script src="js/admin.js"></script>
+  <script src="js/participant.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
