@@ -50,10 +50,12 @@ function vDashboard(){
       ${aq('warn','WPCA Week-2 panel incomplete for some subjects','Review raters',"go('wpca')")}
       ${aq('info','EoCA 2 closes in 2 days — '+Math.round(N*0.26)+' not started','Send reminder',"toast('Reminder sent','ok')")}</div>
     <div class="card pad"><h3 style="margin-bottom:12px">Recent activity</h3>
+      ${ROSTER.length ? `
       ${act(ROSTER[0].n+' submitted EoCA 2','12m ago')}
-      ${act('Comprehensive report ready · '+(ROSTER[1]||ROSTER[0]).n,'1h ago')}
+      ${ROSTER[1]?act('Comprehensive report ready · '+ROSTER[1].n,'1h ago'):''}
       ${act('Baseline closed for cohort','Yesterday')}
-      ${act((ROSTER[2]||ROSTER[0]).n+' submitted EoCA 2','Yesterday')}</div>
+      ${ROSTER[2]?act(ROSTER[2].n+' submitted EoCA 2','Yesterday'):''}`
+      : `<div class="muted small">No activity yet — import a roster from <b>Cohorts</b> to get started.</div>`}</div>
   </div>`;
 }
 const tile=(v,l)=>`<div class="card pad"><div style="font-size:26px;font-weight:700" class="tnum">${v}</div><div class="muted small">${l}</div></div>`;
@@ -224,16 +226,21 @@ function drawWorkload(){
 
 /* === Reports (admin list) === */
 function vReports(){
+  if(!ROSTER.length){
+    return `<div class="crumb">Reports</div><div class="page-head"><h1>Reports</h1></div>
+      <div class="card pad"><p class="muted" style="margin:0">No participants yet. Import a roster from <b>Cohorts</b> to generate reports.</p></div>`;
+  }
   const r=i=>ROSTER[i]||ROSTER[0];
+  const rows=[r(0),r(1),r(2),r(3)].filter(Boolean);
   return `<div class="crumb">Reports</div><div class="page-head"><h1>Reports</h1>
     <button class="btn" onclick="toast('Cohort report queued — LLM job started','ok')">＋ Generate cohort report</button></div>
   <div class="grid" style="grid-template-columns:1fr 1fr">
     <div class="card pad"><h3 style="margin-bottom:12px">Individual reports</h3>
-      ${repRow(r(0).n,'Comprehensive lifecycle')}${repRow(r(1).n,'Comprehensive lifecycle')}
-      ${repRow(r(2).n,'EoCA 2 stage report')}${repRow(r(3).n,'EoCA 2 stage report')}</div>
+      ${repRow(rows[0].n,'Comprehensive lifecycle')}${rows[1]?repRow(rows[1].n,'Comprehensive lifecycle'):''}
+      ${rows[2]?repRow(rows[2].n,'EoCA 2 stage report'):''}${rows[3]?repRow(rows[3].n,'EoCA 2 stage report'):''}</div>
     <div class="card pad"><h3 style="margin-bottom:12px">LLM generation queue</h3>
       ${qRow('Cohort 2026·A — EoCA 2 summary','Generating · analyzing submissions',70)}
-      ${qRow('Individual · '+r(0).n,'Complete',100)}${qRow('Cohort comprehensive','Queued',0)}
+      ${qRow('Individual · '+rows[0].n,'Complete',100)}${qRow('Cohort comprehensive','Queued',0)}
       <div class="ai-block" style="margin-top:14px"><span class="ai-label">✦ AI</span>
       <p style="margin:8px 0 0">Reports analyze scores against the question blueprint and synthesize 360 feedback into themes. Switch to the Participant view to open a finished report.</p></div></div>
   </div>`;
