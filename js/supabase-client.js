@@ -15,10 +15,13 @@
   if (placeholder) {
     console.warn(
       '[CEGIS] config.js still has placeholder Supabase values. ' +
-      'The app runs against sample data until you set SUPABASE_URL and ' +
-      'SUPABASE_ANON_KEY (Supabase Dashboard → Project Settings → API).'
+      'The app runs in DEMO mode (sample data, role toggle, no login) until ' +
+      'you set SUPABASE_URL and SUPABASE_ANON_KEY (Supabase Dashboard → ' +
+      'Project Settings → API).'
     );
   }
+  // auth.js reads this to decide between demo mode and real login.
+  window.SUPABASE_CONFIGURED = !placeholder;
 
   // The supabase-js v2 UMD bundle exposes a global `supabase` with createClient.
   // We name our client `sb` so it does not shadow that global.

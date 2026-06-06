@@ -11,10 +11,11 @@ document.getElementById('roleSwitch').addEventListener('click',e=>{
 
 /* ---------- boot ---------- */
 (async function init(){
-  // octopus loader on first paint while the roster loads
-  mountOctopus(document.querySelector('.main'),'Reading the cohort roster…');
-  await loadRoster();
+  // octopus loader on first paint while we restore the session + roster
+  mountOctopus(document.querySelector('.main'),'Starting up…');
+  await initAuth();                 // restore Supabase session (or enter demo mode)
+  await loadRoster();               // sample data for now (real data lands in Phase 5)
   const opt=document.querySelector('#cohortSel option');
   if(opt) opt.textContent=`Cohort 2026·A — Personnel Management (n=${ROSTER.length})`;
-  render();
+  routeAuth();                      // show login, the claims-error screen, or the app
 })();
