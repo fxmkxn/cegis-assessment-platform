@@ -34,8 +34,13 @@ function pTasks(){
     if (!state.tasksLoading){ state.tasksLoading = true; loadMyTasks(); }
     return `<div class="page-head"><h1>My Tasks</h1></div>${playerLoading('Loading your tasks…')}`;
   }
-  const me = (typeof ME === 'function') ? ME() : { n:'there' };
-  const first = (me.n || 'there').split(/\s+/)[0];
+  // Greet the signed-in participant, not the sample roster. ME() is sample data
+  // for participants (they don't load a full roster). _meFirstSync()/loadMyName()
+  // live in participant.js; renderParticipant() already calls loadMyName() on the
+  // tasks tab, which fills #pWelcome with the real name once fetched.
+  const first = (typeof _meFirstSync === 'function')
+    ? _meFirstSync()
+    : (((typeof ME === 'function' ? ME().n : '') || 'there').split(/\s+/)[0]);
   const live = state.tasks.filter(t => t.attempt_status !== 'submitted');
   const done = state.tasks.filter(t => t.attempt_status === 'submitted');
   const card = t => {
@@ -50,7 +55,7 @@ function pTasks(){
       <div style="flex:1"><b>${t.name}</b><div class="muted small">${sub}${t.attempt_status==='in_progress'?' · in progress':''}</div></div>
       <button class="btn" onclick="startPlayerForAssessment('${t.id}')">${verb} →</button></div>`;
   };
-  return `<div class="page-head"><h1>Welcome back, ${first}</h1></div>
+  return `<div class="page-head"><h1 id="pWelcome">Welcome back, ${typeof _escP==='function'?_escP(first):first}</h1></div>
     <h3 style="margin-bottom:12px">Do now</h3>
     ${live.length ? live.map(card).join('') : '<p class="muted">No assessments awaiting you right now.</p>'}
     ${done.length ? `<hr><h3 style="margin-bottom:12px">Completed</h3>${done.map(card).join('')}` : ''}`;
