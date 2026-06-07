@@ -330,11 +330,62 @@ function tickTimer(){
 
 /* ---------------- Proctoring ---------------- */
 let _proctor = {};
+// Non-strike events (copy/paste/devtools/nav). Logged best-effort; never counted.
 function proctorLog(ev){ const P = state.player; if (!P) return; try { sb.rpc('record_proctor_event', { p_attempt_id: P.attemptId, p_event: ev }); } catch(e){} }
+
+// Strike events = leaving the assessment (tab switch / window blur / full-screen exit).
+// Three strikes across the WHOLE attempt: warn on the 1st and 2nd, auto-submit on the 3rd.
+// The running count is taken from the server (record_proctor_event), so it survives a
+// page refresh once that RPC returns a count. Until then it falls back to an in-memory
+// per-session count. A short debounce stops one "leave" (which can fire both
+// visibilitychange and blur) from registering as two strikes.
+const PROCTOR_STRIKE_LIMIT = 3;
+async function registerViolation(reason){
+  const P = state.player; if (!P || P.terminated) return;
+  const now = Date.now();
+  if (P._lastViolationAt && now - P._lastViolationAt < 1200) return;
+  P._lastViolationAt = now;
+
+  let count = null;
+  try {
+    const { data, error } = await sb.rpc('record_proctor_event', { p_attempt_id: P.attemptId, p_event: reason });
+    if (error) throw error;
+    if (data != null){
+      count = (typeof data === 'number')
+        ? data
+        : (data.violation_count ?? data.violations ?? data.count ?? null);
+    }
+  } catch(e){ /* fall back to the in-memory count below */ }
+  if (count == null){ P._strikes = (P._strikes || 0) + 1; count = P._strikes; }
+  else { P._strikes = count; }
+
+  if (P.terminated) return;
+  if (count >= PROCTOR_STRIKE_LIMIT){ autoSubmit(reason); return; }
+  proctorWarn(count, reason);
+}
+function proctorWarn(count, reason){
+  const P = state.player; if (!P || P.terminated) return;
+  const left = PROCTOR_STRIKE_LIMIT - count;
+  const what = { tab_switch:'left the tab', window_blur:'left the window', fullscreen_exit:'exited full screen' }[reason] || 'left the assessment';
+  // re-arm full screen so a further exit is detectable again
+  if (reason === 'fullscreen_exit'){
+    const el = document.documentElement;
+    if (el.requestFullscreen){ el.requestFullscreen().then(()=>{ P.fsActive = true; }).catch(()=>{}); }
+  }
+  showModal({
+    title: `Proctoring warning ${count} of ${PROCTOR_STRIKE_LIMIT}`,
+    body: `You ${what} during a proctored assessment, which is not allowed. This has been recorded. `
+      + (left === 1
+          ? `<b>One more violation will automatically submit your assessment.</b>`
+          : `After <b>${PROCTOR_STRIKE_LIMIT}</b> violations the assessment is submitted automatically.`),
+    confirm: null,
+    onConfirm: null
+  });
+}
 function attachProctoring(){
   const P = state.player; if (!P) return;
-  _proctor.vis = () => { if (document.hidden && !P.terminated){ autoSubmit('tab_switch'); } };
-  _proctor.blur = () => { setTimeout(() => { if (!P.terminated && !document.hasFocus() && !document.hidden){ autoSubmit('window_blur'); } }, 200); };
+  _proctor.vis = () => { if (document.hidden && !P.terminated){ registerViolation('tab_switch'); } };
+  _proctor.blur = () => { setTimeout(() => { if (!P.terminated && !document.hasFocus() && !document.hidden){ registerViolation('window_blur'); } }, 200); };
   _proctor.block = e => { e.preventDefault(); proctorLog(e.type); toast('That action is disabled during the assessment','err'); };
   _proctor.keys = e => {
     const k = (e.key||'').toLowerCase();
@@ -345,7 +396,7 @@ function attachProctoring(){
     if (blocked){ e.preventDefault(); proctorLog('key:'+k); }
   };
   _proctor.beforeunload = e => { if (!P.terminated){ e.preventDefault(); e.returnValue = ''; proctorLog('nav_attempt'); } };
-  _proctor.fs = () => { const inFs = !!document.fullscreenElement; if (inFs) P.fsActive = true; else if (P.fsActive && !P.terminated){ autoSubmit('fullscreen_exit'); } };
+  _proctor.fs = () => { const inFs = !!document.fullscreenElement; if (inFs) P.fsActive = true; else if (P.fsActive && !P.terminated){ registerViolation('fullscreen_exit'); } };
   document.addEventListener('visibilitychange', _proctor.vis);
   window.addEventListener('blur', _proctor.blur);
   document.addEventListener('contextmenu', _proctor.block);
