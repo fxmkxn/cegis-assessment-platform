@@ -48,9 +48,8 @@ h1,h2,h3{margin:0;color:var(--g900);font-weight:650}
 .ic-btn{background:var(--g100);border:none;color:var(--g600);width:34px;height:34px;border-radius:8px;font-size:15px}
 .ic-btn:hover{background:var(--g200)}
 .avatar{width:32px;height:32px;border-radius:50%;background:var(--indigo);color:#fff;display:grid;place-items:center;font-size:12px;font-weight:700}
-/* header user-avatar circle and notifications bell removed (handled here so index.html needs no edit) */
+/* header user-avatar circle removed (handled here so index.html needs no edit) */
 #userAv{display:none!important}
-.site-header .ic-btn{display:none!important}
 
 /* slim context bar holds the global cohort selector (admin only) */
 .context-bar{background:#fff;border-bottom:1px solid var(--g200);
