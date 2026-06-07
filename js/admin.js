@@ -5,7 +5,7 @@ const ADMIN_NAV = [
   {grp:'Overview'},{k:'dashboard',ic:'▦',label:'Dashboard'},
   {grp:'Manage'},
   {k:'roster',ic:'☷',label:'Cohorts'},
-  {k:'assessments',ic:'⤴',label:'Assessments',badge:'3'},
+  {k:'assessments',ic:'⤴',label:'Assessments'},
   {k:'wpca',ic:'◎',label:'WPCA · 360'},
   {k:'reports',ic:'✦',label:'Reports'},
   {grp:'Program'},{k:'settings',ic:'⚙',label:'Settings'},
@@ -21,6 +21,7 @@ function renderAdmin(){
   const views={dashboard:vDashboard,assessments:vAssessments,wpca:vWPCA,reports:vReports,roster:vRoster,settings:vSettings};
   layout.innerHTML = rail + `<div class="main">${(views[state.view]||vDashboard)()}</div>`;
   if(state.view==='wpca') drawWorkload();
+  if(state.view==='assessments') loadAssessmentList();
 }
 function go(k){state.view=k;render();const m=document.querySelector('.main');if(m)m.scrollTo(0,0);}
 
@@ -84,7 +85,62 @@ function vAssessments(){
   } else if(state.uploadStep===1){ body=validationView(); }
   else if(state.uploadStep===2){ body=previewView(); }
   else { body=deployView(); }
-  return `<div class="crumb">Assessments / Create</div><div class="page-head"><h1>New Assessment — Baseline</h1></div>${stepper}${body}`;
+  return `<div class="crumb">Assessments / Create</div><div class="page-head"><h1>New Assessment — Baseline</h1></div>
+  <div id="assessmentList"></div>${stepper}${body}`;
+}
+
+/* === Existing assessments for the active cohort (live from Supabase) === */
+let _assessCache = { cid:null, list:null };
+function _escA(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function _assessmentsCohortId(){
+  if(typeof state!=='undefined' && state.cohortId) return state.cohortId;
+  const sel=document.getElementById('cohortSel');
+  const v=sel && sel.value;
+  if(v && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v)) return v;
+  if(typeof DB_COHORTS!=='undefined' && DB_COHORTS.length) return DB_COHORTS[0].id;
+  return null;
+}
+function renderAssessmentList(list){
+  const pillClass = s => ({live:'live',scheduled:'sched',closed:'closed'})[s] || 'idle';
+  const fmt = d => d ? new Date(d).toLocaleDateString(undefined,{day:'2-digit',month:'short'}) : '—';
+  if(!list.length){
+    return `<div class="card pad" style="margin-bottom:18px"><div class="flex jb ac"><h3>Assessments in this cohort</h3><span class="muted small">0 created</span></div>
+      <p class="muted small" style="margin:8px 0 0">None yet. Use the wizard below to upload and deploy your first instrument — it'll appear here once deployed.</p></div>`;
+  }
+  const rows=list.map(a=>`<tr>
+    <td><b>${_escA(a.name)}</b></td>
+    <td><span class="tag">${a.kind==='wpca'?'WPCA · 360':'Technical'}</span></td>
+    <td>${_escA((a.stage||'').toUpperCase())}</td>
+    <td><span class="pill ${pillClass(a.status)}">${_escA(a.status||'draft')}</span></td>
+    <td class="muted small">${fmt(a.opens_at)} → ${fmt(a.closes_at)}</td></tr>`).join('');
+  return `<div class="card" style="margin-bottom:18px">
+    <div class="pad" style="border-bottom:1px solid var(--g200)"><div class="flex jb ac"><h3>Assessments in this cohort</h3><span class="muted small">${list.length} created</span></div></div>
+    <div style="overflow:auto"><table><thead><tr><th>Name</th><th>Type</th><th>Stage</th><th>Status</th><th>Window</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+}
+async function loadAssessmentList(force){
+  const el=document.getElementById('assessmentList'); if(!el) return;
+  const authed = !!(typeof AUTH!=='undefined' && AUTH.session && !AUTH.demo);
+  if(!authed){
+    el.innerHTML = `<div class="card pad" style="margin-bottom:18px"><div class="flex jb ac"><h3>Assessments in this cohort</h3><span class="badge warn">demo</span></div>
+      <p class="muted small" style="margin:8px 0 0">Connect Supabase to list the assessments saved for this cohort. Deployed instruments will appear here.</p></div>`;
+    return;
+  }
+  const cid=_assessmentsCohortId();
+  if(!cid){ el.innerHTML=`<div class="card pad" style="margin-bottom:18px"><h3>Assessments in this cohort</h3><p class="muted small" style="margin:8px 0 0">Select a cohort to see its assessments.</p></div>`; return; }
+  if(!force && _assessCache.cid===cid && _assessCache.list){ el.innerHTML=renderAssessmentList(_assessCache.list); return; }
+  el.innerHTML=`<div class="card pad" style="margin-bottom:18px"><h3>Assessments in this cohort</h3><p class="muted small" style="margin:8px 0 0">Loading…</p></div>`;
+  try{
+    const { data, error } = await sb.from('assessments')
+      .select('id,name,kind,stage,status,opens_at,closes_at,created_at')
+      .eq('cohort_id',cid).is('deleted_at',null)
+      .order('created_at',{ascending:false});
+    if(error) throw error;
+    _assessCache={cid,list:data||[]};
+    el.innerHTML=renderAssessmentList(_assessCache.list);
+  }catch(e){
+    el.innerHTML=`<div class="card pad" style="margin-bottom:18px"><div class="flex jb ac"><h3>Assessments in this cohort</h3></div>
+      <p class="badge err" style="margin-top:8px">Couldn't load: ${_escA((e&&e.message)||e)}</p></div>`;
+  }
 }
 function parseCSV(){
   // show the octopus loader while the workbook is "parsed", then advance

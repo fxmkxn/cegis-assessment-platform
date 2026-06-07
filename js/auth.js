@@ -57,7 +57,7 @@ function routeAuth() {
   if (AUTH.demo) {
     if (rs) rs.style.display = '';
     if (ac) ac.style.display = 'none';
-    if (av) av.style.display = '';
+    if (av) av.style.display = 'none';
     render();
     return;
   }
@@ -67,17 +67,27 @@ function routeAuth() {
   // authenticated: role is fixed by the account; hide the demo toggle
   state.role = AUTH.role;
   if (rs) rs.style.display = 'none';
-  if (av) av.style.display = '';
+  if (av) av.style.display = 'none';
   if (ac) {
     ac.style.display = '';
+    const who = _authDisplayName();
     ac.innerHTML =
       `<span class="small muted" style="font-weight:600">${AUTH.role === 'admin' ? 'Admin' : 'Participant'}</span>
-       <button class="btn ghost sm" onclick="openAccount()">Account</button>
+       <button class="btn ghost sm" onclick="openAccount()" title="Account settings">${who}</button>
        <button class="btn ghost sm" onclick="doLogout()">Sign out</button>`;
   }
   render();
   // load live cohorts + roster from Supabase (replaces sample data), then re-render
   if (AUTH.role === 'admin' && typeof initAdminData === 'function') initAdminData();
+}
+
+// Best available human label for the signed-in account: a real name if the
+// account has one (user_metadata), otherwise the email. HTML-escaped.
+function _authDisplayName() {
+  const u = AUTH.user || {};
+  const m = u.user_metadata || {};
+  const raw = m.full_name || m.name || u.email || 'Account';
+  return String(raw).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 }
 
 function _hideAppChrome() {

@@ -8,6 +8,7 @@ function renderParticipant(){
   const showTabs=state.ptab!=='player';
   layout.innerHTML=`<div style="flex:1;display:flex;flex-direction:column;min-height:0">${showTabs?tb:''}<div class="main">${(views[state.ptab]||pTasks)()}</div></div>`;
   if(state.ptab==='reports') initReportScroll();
+  if(state.ptab==='profile') loadProfile();
 }
 function pgo(k){state.ptab=k;if(k!=='player')state.inReview=false;renderParticipant();const m=document.querySelector('.main');if(m)m.scrollTo(0,0);}
 
@@ -44,11 +45,49 @@ function p360(){
     <div class="card pad"><h3 style="margin-bottom:10px">Reviews I owe — WPCA Week 2</h3>${others.map(rowFor).join('')||'<p class="muted">No reviews assigned to you yet.</p>'}</div>`;
 }
 function pProfile(){
-  const me=ME();
-  const fields=[['Name',me.n],['ID',me.id],['Designation',me.des||'—'],['Workstream',me.ws||'—'],['Location',me.loc||'—'],['Reporting manager',me.mgr?nameOf(me.mgr):'—']];
-  return `<div class="page-head"><h1>Profile</h1></div><div class="card pad" style="max-width:480px">
-    ${fields.map(([k,v])=>`<div class="kv"><span class="muted">${k}</span><b>${v}</b></div>`).join('')}
-    <p class="muted small" style="margin-top:12px">Profile details are managed by your program admin.</p></div>`;
+  return `<div class="page-head"><h1>Profile</h1></div>
+    <div class="card pad" style="max-width:480px" id="profileCard">
+      <p class="muted small" style="margin:0">Loading…</p></div>`;
+}
+function _escP(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function _profileRows(fields){return fields.map(([k,v])=>`<div class="kv"><span class="muted">${_escP(k)}</span><b>${_escP(v)}</b></div>`).join('');}
+async function loadProfile(){
+  const el=document.getElementById('profileCard'); if(!el) return;
+  const authed=!!(typeof AUTH!=='undefined' && AUTH.session && !AUTH.demo);
+  if(!authed){
+    const me=ME();
+    el.innerHTML=_profileRows([['Name',me.n],['ID',me.id],['Designation',me.des||'—'],['Workstream',me.ws||'—'],['Location',me.loc||'—'],['Reporting manager',me.mgr?nameOf(me.mgr):'—']])
+      +`<p class="muted small" style="margin-top:12px">Profile details are managed by your program admin.</p>`;
+    return;
+  }
+  const email=(AUTH.user&&AUTH.user.email)||'—';
+  try{
+    const { data, error } = await sb.from('participants')
+      .select('name,email,designation,workstream,location,manager_participant_id')
+      .eq('user_id', AUTH.user.id).is('deleted_at',null).maybeSingle();
+    if(error) throw error;
+    if(!data){
+      el.innerHTML=_profileRows([['Email',email],['Role','Participant']])
+        +`<p class="muted small" style="margin-top:12px">Additional details are managed by your program admin.</p>`;
+      return;
+    }
+    let mgr='—';
+    if(data.manager_participant_id){
+      const { data:m } = await sb.from('participants').select('name').eq('id',data.manager_participant_id).maybeSingle();
+      if(m&&m.name) mgr=m.name;
+    }
+    el.innerHTML=_profileRows([
+      ['Name',data.name||'—'],
+      ['Email',data.email||email],
+      ['Designation',data.designation||'—'],
+      ['Workstream',data.workstream||'—'],
+      ['Location',data.location||'—'],
+      ['Reporting manager',mgr]
+    ])+`<p class="muted small" style="margin-top:12px">To update these details, contact your program admin.</p>`;
+  }catch(e){
+    el.innerHTML=_profileRows([['Email',email],['Role','Participant']])
+      +`<p class="badge err" style="margin-top:12px">Couldn't load full profile: ${_escP((e&&e.message)||e)}</p>`;
+  }
 }
 
 /* === Screen 3 / Flow C: Assessment Player === */
