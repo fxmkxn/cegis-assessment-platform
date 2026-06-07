@@ -5,8 +5,9 @@
 
      ADMIN  "Smart Configurator"
        - auto-assigns each subject a panel (self + manager +
-         reportee + 3 peers) from the cohort hierarchy
-         (ports the prototype's buildPanels()),
+         3 peers) from the cohort hierarchy (buildPanels()):
+         peers exclude self + manager, with up to 2 same-city
+         and >=1 different-city peer, balanced by review load,
        - draws scrollable workload-health bars with a 2–6
          target band,
        - exposes the three constraint sliders,
@@ -127,30 +128,66 @@ function wpcaMeta(p){
 }
 
 /* ============================================================
-   PANEL ASSIGNMENT  (ports the prototype's buildPanels)
+   PANEL ASSIGNMENT  (buildPanels)
    ------------------------------------------------------------
-   Exclude self / manager / reportee from the peer pool, then rank
-   the pool preferring a DIFFERENT location (diversity) and the SAME
-   workstream (relevance); take the top 3 as peers. Backwards-
-   compatible: called with no args it uses the demo globals, so
-   data.js' recomputeDerived() keeps working unchanged.
+   Each subject's panel is: self + manager + 3 peers (no reportee).
+
+   Peer selection:
+     - Pool = everyone EXCEPT the subject and their manager.
+     - City rule: of the 3 peers, up to 2 may be from the subject's
+       OWN city and at least 1 MUST be from a DIFFERENT city.
+     - Load balancing: among eligible candidates we always pick the
+       one currently carrying the FEWEST reviews, so reviews-per-rater
+       stays even. Manager duty is counted first (pass 1) so peer
+       balancing accounts for the load managers already carry.
+
+   Graceful degrade: if a cohort can't satisfy the city rule (e.g.
+   everyone shares one city, or only different-city people remain),
+   the remaining slots are backfilled by lowest current load.
+
+   Backwards-compatible: called with no args it uses the demo globals,
+   so data.js' recomputeDerived() keeps working unchanged.
    ============================================================ */
 function buildPanels(roster, subjects){
   roster   = roster   || ((typeof ROSTER   !== 'undefined') ? ROSTER   : []);
   subjects = subjects || ((typeof SUBJECTS !== 'undefined') ? SUBJECTS : []);
   var panels = {};
+  var load = {};                                   // running review count per rater id
+  function inc(id){ if (id) load[id] = (load[id]||0) + 1; }
+  var byLoad = function(a,b){ return (load[a.id]||0) - (load[b.id]||0); };
+
+  // Pass 1 — managers are fixed by the hierarchy; tally their load up front.
   subjects.forEach(function(s){
-    var reportee = null;
-    for (var i=0;i<roster.length;i++){ if (roster[i].mgr === s.id){ reportee = roster[i]; break; } }
-    var exclude = {}; [s.id, s.mgr, reportee?reportee.id:null].filter(Boolean).forEach(function(x){ exclude[x]=true; });
+    var mgr = (s.mgr && roster.some(function(x){return x.id===s.mgr;})) ? s.mgr : null;
+    panels[s.id] = { mgr: mgr, reportee: null, peers: [] };
+    inc(mgr);
+  });
+
+  // Pass 2 — peers: enforce the city rule, break ties by lowest load.
+  subjects.forEach(function(s){
+    var exclude = {}; [s.id, s.mgr].filter(Boolean).forEach(function(x){ exclude[x]=true; });
     var pool = roster.filter(function(r){ return !exclude[r.id]; });
-    var score = function(r){ return (r.loc && r.loc!==s.loc ? -1 : 0) + (r.ws && r.ws===s.ws ? -0.5 : 0); };
-    var ranked = pool.slice().sort(function(a,b){ return score(a)-score(b); });
-    panels[s.id] = {
-      mgr: (s.mgr && roster.some(function(x){return x.id===s.mgr;})) ? s.mgr : null,
-      reportee: reportee ? reportee.id : null,
-      peers: ranked.slice(0,3).map(function(r){ return r.id; })
-    };
+    var sameCity = pool.filter(function(r){ return r.loc && s.loc && r.loc === s.loc; }).sort(byLoad);
+    var diffCity = pool.filter(function(r){ return !(r.loc && s.loc && r.loc === s.loc); }).sort(byLoad);
+
+    var picked = [], pickedIds = {};
+    function take(arr){
+      while (arr.length){
+        var r = arr.shift();
+        if (!pickedIds[r.id]){ picked.push(r.id); pickedIds[r.id] = true; inc(r.id); return true; }
+      }
+      return false;
+    }
+    take(diffCity);                                // 1 required: different city
+    take(sameCity);                                // up to 2: same city
+    if (picked.length < 3) take(sameCity);
+    // backfill any shortfall (small cohort / city rule unsatisfiable) by lowest load
+    var leftover = sameCity.concat(diffCity).sort(byLoad);
+    while (picked.length < 3 && leftover.length){
+      var r = leftover.shift();
+      if (!pickedIds[r.id]){ picked.push(r.id); pickedIds[r.id] = true; inc(r.id); }
+    }
+    panels[s.id].peers = picked;
   });
   return panels;
 }
@@ -165,7 +202,6 @@ function workloadCount(pid){
   set.subjects.forEach(function(s){
     var p = set.panels[s.id]; if (!p) return;
     if (p.mgr === pid) c++;
-    if (p.reportee === pid) c++;
     if (p.peers && p.peers.indexOf(pid) !== -1) c++;
   });
   return c;
@@ -193,14 +229,13 @@ function vWPCA(){
   var rows = set.subjects.map(function(s){
     var p = set.panels[s.id] || { peers:[] };
     var peerChips = (p.peers||[]).map(function(pid, idx){ return wpcaRaterChip(pid, s, 'peer', s.id, idx); }).join('') || '<span class="muted small">—</span>';
-    var reChip  = p.reportee ? wpcaRaterChip(p.reportee, s, 'reportee', s.id) : '<span class="muted small">— none</span>';
     var mgrChip = p.mgr ? wpcaRaterChip(p.mgr, s, 'mgr', s.id)
       : (set.hier ? '<span class="badge warn">⚠ no manager</span>' : '<span class="tag">n/a</span>');
     var incomplete = ((p.peers||[]).length < 3) || (set.hier && !p.mgr);
     return '<tr><td><b>'+wpcaEsc(s.n)+'</b><div class="muted small">'+wpcaEsc(wpcaMeta(s))+'</div>'+
       (incomplete ? '<span class="badge warn" style="margin-top:4px">⚠ incomplete panel</span>' : '')+'</td>'+
       '<td><span class="chip"><span class="av">Self</span></span></td>'+
-      '<td>'+mgrChip+'</td><td>'+reChip+'</td><td>'+peerChips+'</td></tr>';
+      '<td>'+mgrChip+'</td><td>'+peerChips+'</td></tr>';
   }).join('');
 
   var roundSel = '<select id="wpcaRound" class="btn ghost sm" style="appearance:auto">'+
@@ -214,7 +249,7 @@ function vWPCA(){
   '<div class="grid" style="grid-template-columns:300px 1fr">'+
     '<div>'+
       '<div class="card pad" style="margin-bottom:14px"><h3 style="margin-bottom:4px">Workload health</h3>'+
-        '<div class="muted small" style="margin-bottom:14px">Reviews assigned per rater · target band 2–6</div>'+
+        '<div class="muted small" style="margin-bottom:14px">Reviews assigned per participant · target band 2–6</div>'+
         '<div id="workload"></div><hr style="margin:14px 0"><div id="wlstats" class="small"></div></div>'+
       '<div class="card pad"><h3 style="margin-bottom:8px;font-size:13px">Constraint priorities</h3>'+
         wpcaSlider('Location diversity',75)+wpcaSlider('Equitable load',85)+wpcaSlider('Workstream relevance',55)+'</div>'+
@@ -223,7 +258,7 @@ function vWPCA(){
       '<div class="pad" style="border-bottom:1px solid var(--g200)"><div class="flex jb ac wrap">'+
         '<h3>Peer matrix · '+set.subjects.length+' subjects</h3>'+
         '<span class="muted small">Click any peer chip to swap · 📍 same location · ⇄ cross-workstream</span></div></div>'+
-      '<div style="overflow:auto"><table><thead><tr><th>Subject</th><th>Self</th><th>Manager</th><th>Reportee</th><th>Peers (×3)</th></tr></thead>'+
+      '<div style="overflow:auto"><table><thead><tr><th>Subject</th><th>Self</th><th>Manager</th><th>Peers (×3)</th></tr></thead>'+
       '<tbody>'+rows+'</tbody></table></div>'+
     '</div></div>';
 }
@@ -245,17 +280,13 @@ function wpcaRaterChip(pid, sub, role, subId, peerIdx){
     '<span class="av">'+wpcaInitials(r.n)+'</span>'+wpcaEsc(r.n.split(/\s+/)[0])+' <span class="fl">'+flags+'</span></span>';
 }
 
-/* Workload bars + stats. Target band 2–6 (over-cap is a health SIGNAL, not a
-   blocker; only INCOMPLETE panels disable the roll-out button). */
+/* Workload bars + stats. Lists EVERY participant in the cohort (not just
+   assigned raters) so unused capacity is visible. Target band 2–6 (over-cap
+   is a health SIGNAL, not a blocker; only INCOMPLETE panels disable roll-out). */
 function drawWorkload(){
   var el = document.getElementById('workload'); if (!el) return;
   var set = wpcaSet();
-  var seen = {}, raters = [];
-  set.subjects.forEach(function(s){
-    var p = set.panels[s.id]; if (!p) return;
-    [p.mgr, p.reportee].concat(p.peers||[]).filter(Boolean).forEach(function(id){ if(!seen[id]){ seen[id]=true; raters.push(id); } });
-  });
-  var data = raters.map(function(id){ return { id:id, n:wpcaName(id), c:workloadCount(id) }; })
+  var data = (set.roster||[]).map(function(r){ return { id:r.id, n:(r.n||wpcaName(r.id)), c:workloadCount(r.id) }; })
                    .sort(function(a,b){ return b.c - a.c; });
   var max = Math.max(7, Math.max.apply(null, data.map(function(d){return d.c;}).concat([0])));
 
@@ -266,7 +297,7 @@ function drawWorkload(){
     return '<div class="wl-row"><span class="wl-name" title="'+wpcaEsc(d.n)+'">'+wpcaEsc(d.n)+'</span>'+
       '<div class="wl-track"><div class="wl-band" style="left:'+bandLeft+'%;width:'+bandWidth+'%"></div>'+
       '<div class="wl-fill '+cls+'" style="width:'+(d.c/max*100)+'%"></div></div><span class="wl-val">'+d.c+'</span></div>';
-  }).join('') || '<div class="muted small">No raters assigned.</div>';
+  }).join('') || '<div class="muted small">No participants in this cohort.</div>';
 
   var counts = data.map(function(d){return d.c;});
   var mean = counts.length ? (counts.reduce(function(a,b){return a+b;},0)/counts.length).toFixed(1) : '0';
@@ -307,7 +338,7 @@ function openSwap(subId, peerIdx){
   var sub = wpcaFind(subId); if (!sub) return;
   var panel = set.panels[subId]; if (!panel) return;
   var current = panel.peers[peerIdx];
-  var used = {}; [subId, panel.mgr, panel.reportee].concat(panel.peers||[]).filter(Boolean).forEach(function(x){ used[x]=true; });
+  var used = {}; [subId, panel.mgr].concat(panel.peers||[]).filter(Boolean).forEach(function(x){ used[x]=true; });
   var cands = wpcaEligiblePeers(sub)
     .filter(function(r){ return !used[r.id] || r.id===current; })
     .sort(function(a,b){ return workloadCount(a.id)-workloadCount(b.id); });
@@ -338,12 +369,12 @@ function doSwap(subId, peerIdx, newId){
 function approveWPCA(){
   var set = wpcaSet();
   var total = 0;
-  set.subjects.forEach(function(s){ var p=set.panels[s.id]||{peers:[]}; total += 1 + (p.mgr?1:0) + (p.reportee?1:0) + (p.peers||[]).length; });
+  set.subjects.forEach(function(s){ var p=set.panels[s.id]||{peers:[]}; total += 1 + (p.mgr?1:0) + (p.peers||[]).length; });
   var roundName = (document.getElementById('wpcaRound') || {}).value || 'Week 2';
 
   if (typeof showModal === 'function') showModal({
     title:'Approve & roll out '+wpcaEsc(roundName)+' 360?',
-    body:'This sends <b>'+total+' review invitations</b> across <b>'+set.subjects.length+' subjects</b> to their assigned raters. Self, manager, reportee and three peers per subject. This cannot be undone.',
+    body:'This sends <b>'+total+' review invitations</b> across <b>'+set.subjects.length+' subjects</b> to their assigned raters. Self, manager and three peers per subject. This cannot be undone.',
     confirm:'Approve & roll out',
     onConfirm: function(){ wpcaDoRollout(roundName); }
   });
@@ -353,7 +384,7 @@ function wpcaDoRollout(roundName){
   if (typeof closeModal==='function') closeModal();
   var set = wpcaSet();
   var total = 0;
-  set.subjects.forEach(function(s){ var p=set.panels[s.id]||{peers:[]}; total += 1 + (p.mgr?1:0) + (p.reportee?1:0) + (p.peers||[]).length; });
+  set.subjects.forEach(function(s){ var p=set.panels[s.id]||{peers:[]}; total += 1 + (p.mgr?1:0) + (p.peers||[]).length; });
 
   if (!wpcaLive()){
     if (typeof toast==='function') toast('WPCA '+roundName+' rolled out · '+total+' invitations sent','ok');
@@ -362,9 +393,10 @@ function wpcaDoRollout(roundName){
   }
 
   // LIVE: build the panels payload and call the atomic roll-out RPC.
+  // reportee is intentionally null — panels are self + manager + 3 peers.
   var payload = set.subjects.map(function(s){
     var p = set.panels[s.id] || { peers:[] };
-    return { subject:s.id, manager:p.mgr||null, reportee:p.reportee||null, peers:(p.peers||[]).filter(Boolean) };
+    return { subject:s.id, manager:p.mgr||null, reportee:null, peers:(p.peers||[]).filter(Boolean) };
   });
 
   if (typeof mountOctopus==='function'){ var m=document.querySelector('.main'); if(m) mountOctopus(m,'Rolling out the 360 and sending invitations…'); }
