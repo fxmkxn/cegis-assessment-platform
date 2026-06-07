@@ -211,7 +211,8 @@ function validateAssessment(rows, map, format){
 
 /* ---------- wizard view (overrides the prototype stub) ---------- */
 function vAssessments(){
-  const A = state.asmt || (state.asmt = { kind:'technical', stage:'eoca', name:'', step:0 });
+  const A = state.asmt || (state.asmt = { kind:'technical', stage:'eoca', name:'', step:0, creating:false });
+  if (!A.creating) return asmtListView();          // list-first; the wizard is opened via ＋ New assessment
   state.uploadStep = A.step;
   const steps = ['Upload file','Validate & fix','Preview','Deploy'];
   let stepper = '<div class="stepper">';
@@ -225,8 +226,96 @@ function vAssessments(){
   else if (A.step === 2) body = asmtPreviewView(A);
   else body = asmtDeployView(A);
 
-  return `<div class="crumb">Assessments / Create</div>
-    <div class="page-head"><h1>New Assessment</h1></div>${stepper}${body}`;
+  return `<div class="crumb">Assessments / New</div>
+    <div class="page-head"><h1>New Assessment</h1>
+      <button class="btn ghost" onclick="asmtBackToList()">← Back to list</button></div>${stepper}${body}`;
+}
+
+/* ---------- list view: created assessments for the active cohort ----------
+ * Reuses the existing renderAdmin trigger: admin.js calls loadAssessmentList()
+ * whenever the Assessments screen renders. This definition (loaded after
+ * admin.js) overrides the earlier stub and targets #asmtListBody.
+ */
+function asmtListView(){
+  return `<div class="crumb">Manage / Assessments</div>
+    <div class="page-head"><h1>Assessments</h1>
+      <button class="btn" onclick="asmtNew()">＋ New assessment</button></div>
+    <div id="asmtListBody"><div class="card pad"><p class="muted small" style="margin:0">Loading…</p></div></div>`;
+}
+function asmtNew(){
+  state.asmt = { kind:'technical', stage:'eoca', name:'', step:0, creating:true };
+  renderAdmin();
+}
+function asmtBackToList(){
+  state.asmt = { kind:'technical', stage:'eoca', name:'', step:0, creating:false };
+  renderAdmin();
+}
+
+let _asmtListCache = { cid:null, list:null };
+function _asmtEsc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function renderAsmtList(list){
+  const pillClass = s => ({live:'live',scheduled:'sched',closed:'closed'})[s] || 'idle';
+  const fmt = d => d ? new Date(d).toLocaleDateString(undefined,{day:'2-digit',month:'short'}) : '—';
+  const kindLabel = k => k==='wpca' ? 'WPCA · 360' : 'Technical';
+  if (!list.length){
+    return `<div class="card pad"><div class="flex jb ac"><h3>Assessments in this cohort</h3><span class="muted small">0 created</span></div>
+      <p class="muted small" style="margin:8px 0 0">None yet. Click <b>＋ New assessment</b> to upload and deploy your first instrument.</p></div>`;
+  }
+  const rows = list.map(a => `<tr>
+    <td><b>${_asmtEsc(a.name)}</b></td>
+    <td><span class="tag">${kindLabel(a.kind)}</span></td>
+    <td>${_asmtEsc((a.stage||'').toUpperCase())}</td>
+    <td><span class="pill ${pillClass(a.status)}">${_asmtEsc(a.status||'draft')}</span></td>
+    <td class="muted small">${fmt(a.opens_at)} → ${fmt(a.closes_at)}</td>
+    <td style="text-align:right"><button class="btn ghost sm" onclick="asmtDelete('${a.id}')">Delete</button></td>
+  </tr>`).join('');
+  return `<div class="card">
+    <div class="pad" style="border-bottom:1px solid var(--g200)"><div class="flex jb ac"><h3>Assessments in this cohort</h3><span class="muted small">${list.length} created</span></div></div>
+    <div style="overflow:auto"><table><thead><tr><th>Name</th><th>Type</th><th>Stage</th><th>Status</th><th>Window</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+}
+async function loadAssessmentList(force){
+  const el = document.getElementById('asmtListBody');
+  if (!el) return;                                  // not on the list (wizard mode / other screen)
+  const authed = !!(typeof AUTH!=='undefined' && AUTH.session && !AUTH.demo);
+  if (!authed){
+    el.innerHTML = `<div class="card pad"><div class="flex jb ac"><h3>Assessments in this cohort</h3><span class="badge warn">demo</span></div>
+      <p class="muted small" style="margin:8px 0 0">Connect Supabase to create and manage assessments for a cohort.</p></div>`;
+    return;
+  }
+  const cid = currentCohortId();
+  if (!cid){ el.innerHTML = `<div class="card pad"><p class="muted small" style="margin:0">Select a cohort in the top bar to see its assessments.</p></div>`; return; }
+  if (!force && _asmtListCache.cid===cid && _asmtListCache.list){ el.innerHTML = renderAsmtList(_asmtListCache.list); return; }
+  el.innerHTML = `<div class="card pad"><p class="muted small" style="margin:0">Loading…</p></div>`;
+  try{
+    const { data, error } = await sb.from('assessments')
+      .select('id,name,kind,stage,status,opens_at,closes_at,created_at')
+      .eq('cohort_id', cid).is('deleted_at', null)
+      .order('created_at', { ascending:false });
+    if (error) throw error;
+    _asmtListCache = { cid, list: data||[] };
+    el.innerHTML = renderAsmtList(_asmtListCache.list);
+  }catch(e){
+    el.innerHTML = `<div class="card pad"><p class="badge err" style="margin:0">Couldn't load assessments: ${_asmtEsc((e&&e.message)||e)}</p></div>`;
+  }
+}
+function asmtDelete(id){
+  const a = (_asmtListCache.list||[]).find(x=>x.id===id);
+  const name = a ? a.name : 'this assessment';
+  showModal({
+    title: 'Delete assessment?',
+    body: `Delete <b>${_asmtEsc(name)}</b> from this cohort? This soft-deletes it (recoverable in the database) and removes it from participants' view.`,
+    confirm: 'Delete',
+    onConfirm: async () => {
+      closeModal();
+      try{
+        const { error } = await sb.rpc('delete_assessment', { p_assessment_id: id });
+        if (error) throw error;
+        toast('Assessment deleted', 'ok');
+        _asmtListCache = { cid:null, list:null };   // bust cache so the row disappears
+        loadAssessmentList(true);
+      }catch(e){ toast('Delete failed: ' + (e.message || e), 'err'); }
+    }
+  });
 }
 
 function asmtUploadView(A){
@@ -435,13 +524,15 @@ async function asmtDoDeploy(){
     });
     if (depErr){
       toast('Imported as draft, but deploy failed: ' + depErr.message, 'err');
-      state.asmt = { kind:'technical', stage:'eoca', name:'', step:0 };
+      _asmtListCache = { cid:null, list:null };
+      state.asmt = { kind:'technical', stage:'eoca', name:'', step:0, creating:false };
       go('assessments'); return;
     }
 
     toast(`${A.name} deployed (${imp.question_count} questions)`, 'ok');
-    state.asmt = { kind:'technical', stage:'eoca', name:'', step:0 };
-    go('dashboard');
+    _asmtListCache = { cid:null, list:null };
+    state.asmt = { kind:'technical', stage:'eoca', name:'', step:0, creating:false };
+    go('assessments');
   } catch (e){
     toast('Deploy failed: ' + (e.message || e), 'err');
     state.asmt.step = 3; renderAdmin();
