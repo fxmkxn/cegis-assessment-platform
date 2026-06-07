@@ -9,12 +9,39 @@ function renderParticipant(){
   layout.innerHTML=`<div style="flex:1;display:flex;flex-direction:column;min-height:0">${showTabs?tb:''}<div class="main">${(views[state.ptab]||pTasks)()}</div></div>`;
   if(state.ptab==='reports') initReportScroll();
   if(state.ptab==='profile') loadProfile();
+  if(state.ptab==='tasks') loadMyName();
 }
 function pgo(k){state.ptab=k;if(k!=='player')state.inReview=false;renderParticipant();const m=document.querySelector('.main');if(m)m.scrollTo(0,0);}
 
+// Real name of the signed-in participant once known (authed mode); cached so
+// the greeting is instant after the first fetch and across tab switches.
+let _meName = null;
+function _meFirstSync(){
+  if(typeof AUTH!=='undefined' && AUTH.session && !AUTH.demo){
+    if(_meName) return _meName.split(/\s+/)[0];
+    const u=AUTH.user||{}, m=u.user_metadata||{};
+    const nm=m.full_name||m.name;
+    if(nm) return String(nm).split(/\s+/)[0];
+    if(u.email) return String(u.email).split('@')[0];
+    return 'there';
+  }
+  return ME().n.split(/\s+/)[0];
+}
+async function loadMyName(){
+  if(!(typeof AUTH!=='undefined' && AUTH.session && !AUTH.demo)) return;
+  if(_meName) return;
+  try{
+    const { data } = await sb.from('participants').select('name').eq('user_id',AUTH.user.id).is('deleted_at',null).maybeSingle();
+    if(data && data.name){
+      _meName=data.name;
+      const h=document.getElementById('pWelcome');
+      if(h) h.textContent='Welcome back, '+_escP(_meName.split(/\s+/)[0]);
+    }
+  }catch(e){/* keep the best-guess greeting */}
+}
 function pTasks(){
-  const first=ME().n.split(/\s+/)[0];
-  return `<div class="page-head"><h1>Welcome back, ${first}</h1></div>
+  const first=_escP(_meFirstSync());
+  return `<div class="page-head"><h1 id="pWelcome">Welcome back, ${first}</h1></div>
   <h3 style="margin-bottom:12px">Do now</h3>
   <div class="task ${state.submitted?'done':''}"><div class="ic2">${state.submitted?'✓':'✎'}</div>
     <div style="flex:1"><b>End-of-Course Assessment 2</b><div class="muted small">8 questions · no time limit · ${state.submitted?'submitted':'auto-saves as you go'}</div></div>
@@ -76,6 +103,7 @@ async function loadProfile(){
       const { data:m } = await sb.from('participants').select('name').eq('id',data.manager_participant_id).maybeSingle();
       if(m&&m.name) mgr=m.name;
     }
+    if(data.name) _meName=data.name;
     el.innerHTML=_profileRows([
       ['Name',data.name||'—'],
       ['Email',data.email||email],
