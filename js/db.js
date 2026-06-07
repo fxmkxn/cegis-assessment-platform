@@ -21,7 +21,7 @@ async function dbCreateCohort(name) {
 
 async function dbParticipants(cohortId) {
   const { data, error } = await sb.from('participants')
-    .select('id,name,email,designation,workstream,location,manager_participant_id,extra')
+    .select('id,name,email,designation,workstream,location,manager_participant_id,extra,user_id')
     .eq('cohort_id', cohortId).is('deleted_at', null).order('name');
   if (error) throw error;
   return data || [];
@@ -33,6 +33,40 @@ async function dbImportRoster(cohortId, rows, columnMap, filePath) {
     p_file_path: filePath || '(in-browser)', p_column_map: columnMap || {}
   });
   if (error) throw error;
+  return data;
+}
+
+// ---------- single-participant edits (roster editor) ----------
+// Add + edit are plain admin RLS writes. Remove goes through the
+// manage-participant Edge Function because deleting the login account
+// needs the service-role key (never in the browser).
+async function dbAddParticipant(fields) {
+  const { error } = await sb.from('participants').insert({
+    org_id: AUTH.orgId,
+    cohort_id: state.cohortId,
+    name: fields.name,
+    email: fields.email,
+    designation: fields.designation || null,
+    workstream: fields.workstream || null,
+    location: fields.location || null,
+    manager_participant_id: fields.manager_participant_id || null
+  });
+  if (error) throw error;
+}
+
+async function dbUpdateParticipant(pid, fields) {
+  const { error } = await sb.from('participants')
+    .update(fields)
+    .eq('id', pid).eq('org_id', AUTH.orgId);
+  if (error) throw error;
+}
+
+async function dbRemoveParticipant(pid) {
+  const { data, error } = await sb.functions.invoke('manage-participant', {
+    body: { action: 'remove', participant_id: pid }
+  });
+  if (error) throw error;
+  if (data && data.error) throw new Error(data.error);
   return data;
 }
 
@@ -59,7 +93,8 @@ async function loadRosterFromDb(cohortId) {
     mgr: (p.manager_participant_id && byId[p.manager_participant_id])
       ? (byId[p.manager_participant_id].email || byId[p.manager_participant_id].id) : null,
     _pid: p.id,
-    _mgrPid: p.manager_participant_id || null
+    _mgrPid: p.manager_participant_id || null,
+    _uid: p.user_id || null
   }));
   DATA_SOURCE = 'supabase';
   recomputeDerived();

@@ -314,10 +314,12 @@ function vRoster(){
   const authed = !!(typeof AUTH !== 'undefined' && AUTH.session && !AUTH.demo);
   if(authed && state.rosterPreview) return vRosterPreview();
 
+  const actTh = authed ? '<th style="width:1%"></th>' : '';
+  const colspan = authed ? 7 : 6;
   const rows=ROSTER.map(r=>`<tr><td><b>${r.n}</b></td><td class="muted small">${r.id}</td>
-    <td>${r.des||'—'}</td><td>${r.ws?`<span class="tag">${r.ws}</span>`:'—'}</td><td>${r.loc||'—'}</td><td>${r.mgr?nameOf(r.mgr):'—'}</td></tr>`).join('')
-    || '<tr><td colspan="6" class="muted" style="padding:18px">No participants yet.</td></tr>';
-  const table=`<div class="card"><div style="overflow:auto"><table><thead><tr><th>Name</th><th>ID</th><th>Designation</th><th>Workstream</th><th>Location</th><th>Reporting manager</th></tr></thead>
+    <td>${r.des||'—'}</td><td>${r.ws?`<span class="tag">${r.ws}</span>`:'—'}</td><td>${r.loc||'—'}</td><td>${r.mgr?nameOf(r.mgr):'—'}</td>${authed?`<td style="white-space:nowrap;text-align:right"><button class="btn ghost sm" onclick="openEditParticipant('${r._pid}')">Edit</button> <button class="btn ghost sm" onclick="confirmRemoveParticipant('${r._pid}')">Remove</button></td>`:''}</tr>`).join('')
+    || `<tr><td colspan="${colspan}" class="muted" style="padding:18px">No participants yet.</td></tr>`;
+  const table=`<div class="card"><div style="overflow:auto"><table><thead><tr><th>Name</th><th>ID</th><th>Designation</th><th>Workstream</th><th>Location</th><th>Reporting manager</th>${actTh}</tr></thead>
     <tbody>${rows}</tbody></table></div></div>`;
 
   if(!authed){
@@ -341,7 +343,8 @@ function vRoster(){
       <div class="flex g12 ac"><button class="btn" onclick="generateCredentialsForCurrentCohort()">Generate credentials</button><button class="btn ghost" onclick="createCohortPrompt()">＋ New cohort</button></div></div>
     ${hasCohort ? `${dz}
       <div class="flex jb ac" style="margin:16px 0 10px"><h3>Participants</h3>
-        <span class="badge ${DATA_SOURCE==='supabase'?'ok':'warn'}">${src}</span></div>
+        <div class="flex g12 ac"><span class="badge ${DATA_SOURCE==='supabase'?'ok':'warn'}">${src}</span>
+        <button class="btn ghost sm" onclick="openAddParticipant()">＋ Add participant</button></div></div>
       ${table}`
     : `<div class="card pad"><p class="muted" style="margin:0">No cohorts yet. Create one to upload a roster — use <b>＋ New cohort</b> above.</p></div>`}`;
 }
@@ -372,3 +375,113 @@ function vRosterPreview(){
 function vSettings(){return `<div class="page-head"><h1>Settings</h1></div><div class="grid" style="grid-template-columns:1fr 1fr">
   ${['Users & admin roles','Competency framework / blueprints','Integrations · LLM API key','Audit log']
     .map(s=>`<div class="card pad"><h3>${s}</h3><p class="muted small" style="margin:6px 0 0">Configure ${s.toLowerCase()}.</p></div>`).join('')}</div>`;}
+
+/* === Roster editor: add / edit / soft-remove a participant === */
+// Manager picker options from the live roster. Excludes `excludePid` so a
+// participant can't be set as their own manager.
+function _participantOptions(selectedPid, excludePid){
+  const opts = ['<option value="">— none —</option>'];
+  ROSTER.forEach(r=>{
+    if(excludePid && r._pid===excludePid) return;
+    if(!r._pid) return;
+    const sel = r._pid===selectedPid ? 'selected' : '';
+    opts.push(`<option value="${r._pid}" ${sel}>${_escA(r.n)}${r.id?(' · '+_escA(r.id)):''}</option>`);
+  });
+  return opts.join('');
+}
+// `p` is a normalized prefill {name,email,des,ws,loc,_mgrPid,_pid}. lockEmail
+// hides email editing for someone who already has a login account.
+function _participantForm(p, lockEmail){
+  const v = k => _escA(p[k]==null?'':p[k]);
+  const emailField = lockEmail
+    ? `<input id="rp_email" value="${v('email')}" disabled style="margin-bottom:4px">
+       <div class="muted small" style="margin:0 0 10px">Email is tied to this person's login and can't be changed here. To change it, remove and re-add them.</div>`
+    : `<input id="rp_email" placeholder="email@org.in" value="${v('email')}" style="margin-bottom:10px">`;
+  return `<div class="fib">
+    <input id="rp_name" placeholder="Full name" value="${v('name')}" style="margin-bottom:10px">
+    ${emailField}
+    <input id="rp_des" placeholder="Designation" value="${v('des')}" style="margin-bottom:10px">
+    <input id="rp_ws" placeholder="Workstream" value="${v('ws')}" style="margin-bottom:10px">
+    <input id="rp_loc" placeholder="Location" value="${v('loc')}" style="margin-bottom:10px">
+    <select id="rp_mgr" style="width:100%;padding:13px 14px;border:1.5px solid var(--g300);border-radius:10px;font-size:15px;font-family:inherit">
+      ${_participantOptions(p._mgrPid||'', p._pid||null)}</select>
+    <div class="muted small" style="margin-top:6px">Reporting manager (optional)</div>
+  </div>`;
+}
+function _readParticipantForm(){
+  const get = id => ((document.getElementById(id)||{}).value || '').trim();
+  return { name:get('rp_name'), email:get('rp_email').toLowerCase(),
+           designation:get('rp_des'), workstream:get('rp_ws'),
+           location:get('rp_loc'), manager_participant_id:(get('rp_mgr')||null) };
+}
+
+function openAddParticipant(){
+  if(!state.cohortId){ toast('Select or create a cohort first','err'); return; }
+  showModal({ title:'Add participant', body:_participantForm({}, false),
+    confirm:'Add', onConfirm:submitAddParticipant });
+}
+async function submitAddParticipant(){
+  const f = _readParticipantForm();
+  if(!f.name){ toast('Name is required','err'); return; }
+  if(!f.email){ toast('Email is required','err'); return; }
+  closeModal();
+  mountOctopus(document.querySelector('.main'),'Adding participant…');
+  try{
+    await dbAddParticipant(f);
+    await loadRosterFromDb(state.cohortId);
+    toast('Participant added','ok');
+  }catch(e){ toast(_dupMsg(e,'A participant with that email already exists in this cohort.')||'Could not add participant','err'); }
+  renderAdmin();
+}
+
+function openEditParticipant(pid){
+  const r = ROSTER.find(x=>x._pid===pid); if(!r){ toast('Participant not found','err'); return; }
+  const credentialed = !!r._uid;
+  const prefill = { name:r.n, email:r.id, des:r.des, ws:r.ws, loc:r.loc, _mgrPid:r._mgrPid, _pid:r._pid };
+  showModal({ title:`Edit ${_escA(r.n)}`, body:_participantForm(prefill, credentialed),
+    confirm:'Save changes', onConfirm:()=>submitEditParticipant(pid) });
+}
+async function submitEditParticipant(pid){
+  const r = ROSTER.find(x=>x._pid===pid);
+  const credentialed = !!(r && r._uid);
+  const f = _readParticipantForm();
+  if(!f.name){ toast('Name is required','err'); return; }
+  const fields = { name:f.name, designation:f.designation||null, workstream:f.workstream||null,
+                   location:f.location||null, manager_participant_id:f.manager_participant_id };
+  if(!credentialed){
+    if(!f.email){ toast('Email is required','err'); return; }
+    fields.email = f.email;
+  }
+  closeModal();
+  mountOctopus(document.querySelector('.main'),'Saving changes…');
+  try{
+    await dbUpdateParticipant(pid, fields);
+    await loadRosterFromDb(state.cohortId);
+    toast('Participant updated','ok');
+  }catch(e){ toast(_dupMsg(e,'That email is already used by another participant in this cohort.')||'Could not update participant','err'); }
+  renderAdmin();
+}
+
+function confirmRemoveParticipant(pid){
+  const r = ROSTER.find(x=>x._pid===pid); if(!r) return;
+  const credentialed = !!r._uid;
+  showModal({ title:`Remove ${_escA(r.n)}?`,
+    body:`This soft-deletes them from this cohort. Their assessment history is kept, and the email can be re-added later.`
+      + (credentialed ? ` <b>Their login account will also be deleted</b>, so they can no longer sign in.`
+                      : ` They don't have a login account yet, so there's nothing to revoke.`),
+    confirm:'Remove participant', onConfirm:()=>doRemoveParticipant(pid) });
+}
+async function doRemoveParticipant(pid){
+  closeModal();
+  mountOctopus(document.querySelector('.main'),'Removing participant…');
+  try{
+    await dbRemoveParticipant(pid);
+    await loadRosterFromDb(state.cohortId);
+    toast('Participant removed','ok');
+  }catch(e){ toast(e.message||'Could not remove participant','err'); }
+  renderAdmin();
+}
+// friendly message for a unique-violation, else null (caller falls back)
+function _dupMsg(e, msg){
+  return ((e && e.code==='23505') || /duplicate|unique/i.test((e&&e.message)||'')) ? msg : null;
+}
