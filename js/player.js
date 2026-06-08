@@ -98,7 +98,7 @@ function playerInstructions(assessmentId){
         <div class="badge warn" style="font-size:13px;padding:7px 12px;margin-bottom:14px">⚠ Please read before you begin</div>
         <p style="margin:0 0 10px;line-height:1.6">Do not change tabs, minimise, or close the window.</p>
         ${timed ? `<p style="margin:0 0 10px;line-height:1.6">Assessment attempts are timed (<b>${t.time_limit_minutes} minutes</b>), and the moment time runs out, it will be auto-submitted.</p>` : ''}
-        ${t.proctored === true ? `<p class="muted small" style="margin:0 0 4px">Leaving the assessment window is recorded; repeated violations will auto-submit your attempt.</p>` : ''}
+        <p class="muted small" style="margin:0 0 4px">Leaving the assessment window is recorded; repeated violations will auto-submit your attempt.</p>
         <div class="flex jb ac wrap g12" style="margin-top:20px">
           <span class="muted small">Once you begin${timed ? ', the timer starts immediately' : ''}.</span>
           <button class="btn" onclick="startPlayerForAssessment('${t.id}')">Begin assessment →</button>
@@ -131,6 +131,7 @@ async function startPlayerForAssessment(assessmentId){
       proctored: data.assessment.proctored !== false
     };
     if (state.player.proctored) attachProctoring();
+    await loadQuestionImages(state.player.questions);
     startTimer();
     renderParticipant();
     tickTimer();
@@ -138,6 +139,19 @@ async function startPlayerForAssessment(assessmentId){
     toast('Could not start assessment: ' + (e.message || e), 'err');
     state.tasks = undefined; pgo('tasks');
   }
+}
+
+// Question images live in a private bucket; resolve a short-lived signed URL
+// for each before the player renders. Failures are non-fatal (prompt still shows).
+async function loadQuestionImages(questions){
+  const imgs = (questions || []).filter(q => q.image_path && !q._imgURL);
+  if (!imgs.length) return;
+  await Promise.all(imgs.map(async q => {
+    try {
+      const { data, error } = await sb.storage.from('question-images').createSignedUrl(q.image_path, 3600);
+      if (!error && data) q._imgURL = data.signedUrl;
+    } catch(e){ /* leave unset */ }
+  }));
 }
 
 /* ---------------- Player render (two columns: question | navigator) ---------------- */
@@ -166,7 +180,8 @@ function pPlayer(){
           <div class="save-ind ${ind[0]}"><span class="d"></span>${ind[1]}</div></div>
         <div class="card pad" id="qArea" style="margin-top:18px">
           <span class="tag">${typeLabel}</span>
-          <p style="font-size:17px;font-weight:600;margin:14px 0 18px;line-height:1.45">${q.prompt}</p>
+          <p style="font-size:17px;font-weight:600;margin:14px 0 14px;line-height:1.45">${(typeof mdToSafeHtml==='function'?mdToSafeHtml(q.prompt):q.prompt)}</p>
+          ${q._imgURL?`<img src="${q._imgURL}" alt="" style="display:block;max-width:100%;border-radius:10px;border:1px solid var(--g200);margin:0 0 16px">`:''}
           ${playerControls(q)}</div>
         <div class="flex jb ac" style="margin-top:18px">
           <button class="flagbtn ${flagged?'on':''}" id="flagBtn" onclick="playerFlag('${q.id}')">${flagged?'⚑ Flagged':'⚐ Flag for review'}</button>

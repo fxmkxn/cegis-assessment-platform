@@ -253,6 +253,15 @@ function asmtBackToList(){
 
 let _asmtListCache = { cid:null, list:null };
 function _asmtEsc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+// Markdown subset -> safe HTML. Escape first (so no raw HTML survives), then
+// apply only **bold**, *italic*, and newlines. Shared with the player (loaded later).
+function mdToSafeHtml(text){
+  let h = _asmtEsc(text);
+  h = h.replace(/\*\*([^*]+?)\*\*/g, '<strong>$1</strong>');
+  h = h.replace(/\*([^*]+?)\*/g, '<em>$1</em>');
+  h = h.replace(/\r?\n/g, '<br>');
+  return h;
+}
 function renderAsmtList(list){
   const pillClass = s => ({live:'live',scheduled:'sched',closed:'closed'})[s] || 'idle';
   const fmt = d => d ? new Date(d).toLocaleDateString(undefined,{day:'2-digit',month:'short'}) : '—';
@@ -423,17 +432,106 @@ function asmtValidateView(A){
 }
 
 function asmtPreviewView(A){
-  const cards = A.questions.slice(0,3).map(q => `<div class="card pad" style="margin-bottom:14px">
-    <div class="flex jb"><span class="tag">${(q.type==='mcq'?'mcqsca':q.type==='multi'?'mcqmca':q.type).toUpperCase()}${q.level?' · '+q.level:''}</span><span class="muted small">Q${q.ordinal}</span></div>
-    <p style="font-weight:600;margin:10px 0 12px">${q.prompt}</p>${asmtPreviewControls(q)}</div>`).join('');
-  const more = A.questions.length > 3
-    ? `<div class="muted small" style="text-align:center;margin:6px 0">…${A.questions.length-3} more questions</div>` : '';
+  const cards = A.questions.map((q, i) => asmtEditorCard(q, i)).join('');
   return `<div class="card pad" style="margin-bottom:14px"><div class="flex ac g12"><span class="badge info">i</span>
-      <div>This is how participants will see each question. Competency tags drive the LLM report blueprint.</div></div></div>
-    ${cards}${more}
+      <div>Edit each question's text and optionally attach an image. <b>**bold**</b>, <i>*italic*</i> and line breaks render for participants. Options, marks and competency tags come from your file.</div></div></div>
+    ${cards}
     <div class="flex g12" style="margin-top:16px;justify-content:flex-end">
       <button class="btn ghost" onclick="state.asmt.step=1;renderAdmin()">← Back</button>
       <button class="btn" onclick="state.asmt.step=3;renderAdmin()">Continue to deploy →</button></div>`;
+}
+
+// One editable question card: type tag, text editor with a B/I/↵ toolbar,
+// a live participant-eye preview, and an image attach/remove control.
+function asmtEditorCard(q, i){
+  const typeTag = (q.type==='mcq'?'mcqsca':q.type==='multi'?'mcqmca':q.type).toUpperCase();
+  const hasImg  = !!(q._imgURL || q.image_path);
+  const imgBlock = hasImg
+    ? `<div class="flex ac g12" style="margin-top:6px">
+         ${q._imgURL ? `<img src="${q._imgURL}" alt="" style="max-height:120px;max-width:100%;border-radius:8px;border:1px solid var(--g200)">`
+                     : `<span class="muted small">image attached</span>`}
+         <button class="btn ghost sm" onclick="asmtRemoveImage(${i})">Remove image</button>
+       </div>`
+    : `<input type="file" id="asmtImg${i}" accept="image/*" style="display:none" onchange="asmtPickImage(${i}, this.files[0])">
+       <button class="btn ghost sm" style="margin-top:6px" onclick="document.getElementById('asmtImg${i}').click()">＋ Attach image</button>`;
+  return `<div class="card pad" style="margin-bottom:14px">
+    <div class="flex jb ac"><span class="tag">${typeTag}${q.level?' · '+q.level:''}</span><span class="muted small">Q${q.ordinal}</span></div>
+
+    <div class="muted small" style="margin:12px 0 4px;font-weight:600">Question text</div>
+    <div class="flex g8 ac wrap" style="margin-bottom:6px">
+      <button class="btn ghost sm" type="button" onmousedown="event.preventDefault()" onclick="asmtFmt(${i},'**')"><b>B</b></button>
+      <button class="btn ghost sm" type="button" onmousedown="event.preventDefault()" onclick="asmtFmt(${i},'*')"><i>I</i></button>
+      <button class="btn ghost sm" type="button" onmousedown="event.preventDefault()" onclick="asmtNewline(${i})">↵ Line break</button>
+      <span class="muted small">Select text, then Bold / Italic</span>
+    </div>
+    <textarea id="asmtPrompt${i}" rows="3" oninput="asmtEditPrompt(${i}, this.value)"
+      style="width:100%;padding:11px 13px;border:1.5px solid var(--g300);border-radius:10px;font:inherit;line-height:1.5;resize:vertical">${_asmtEsc(q.prompt)}</textarea>
+
+    <div class="muted small" style="margin:12px 0 4px;font-weight:600">Participant preview</div>
+    <div style="background:var(--g50);border:1px solid var(--g200);border-radius:8px;padding:12px">
+      <div id="asmtPrev${i}" style="font-weight:600;line-height:1.5">${mdToSafeHtml(q.prompt)||'<span class="muted">(empty)</span>'}</div>
+      <div style="margin-top:12px">${asmtPreviewControls(q)}</div>
+    </div>
+
+    <div class="muted small" style="margin:14px 0 0;font-weight:600">Image</div>
+    ${imgBlock}
+  </div>`;
+}
+
+function asmtEditPrompt(i, val){
+  const q = state.asmt.questions[i]; if (!q) return;
+  q.prompt = val;
+  const el = document.getElementById('asmtPrev'+i);
+  if (el) el.innerHTML = mdToSafeHtml(val) || '<span class="muted">(empty)</span>';
+}
+
+// wrap the current selection (or a placeholder) in a markdown marker
+function asmtFmt(i, marker){
+  const ta = document.getElementById('asmtPrompt'+i); if (!ta) return;
+  const s = ta.selectionStart, e = ta.selectionEnd, v = ta.value;
+  const sel = (s !== e) ? v.slice(s, e) : (marker==='**' ? 'bold text' : 'italic text');
+  ta.value = v.slice(0, s) + marker + sel + marker + v.slice(e);
+  const ns = s + marker.length;
+  ta.focus(); ta.setSelectionRange(ns, ns + sel.length);
+  asmtEditPrompt(i, ta.value);
+}
+function asmtNewline(i){
+  const ta = document.getElementById('asmtPrompt'+i); if (!ta) return;
+  const s = ta.selectionStart, e = ta.selectionEnd, v = ta.value;
+  ta.value = v.slice(0, s) + '\n' + v.slice(e);
+  const c = s + 1; ta.focus(); ta.setSelectionRange(c, c);
+  asmtEditPrompt(i, ta.value);
+}
+
+// upload an image to the private question-images bucket; store the org-scoped path
+async function asmtPickImage(i, file){
+  const q = state.asmt.questions[i];
+  if (!q || !file) return;
+  if (!/^image\//.test(file.type)){ toast('Please choose an image file', 'err'); return; }
+  if (file.size > 5 * 1024 * 1024){ toast('Image must be under 5 MB', 'err'); return; }
+  const cohortId = currentCohortId();
+  if (!cohortId){ toast('Select a cohort first', 'err'); return; }
+  if (!window.AUTH || !AUTH.orgId){ toast('Not signed in', 'err'); return; }
+  const ext  = ((file.name.split('.').pop() || 'png').toLowerCase().replace(/[^a-z0-9]/g, '')) || 'png';
+  const path = `${AUTH.orgId}/${cohortId}/q${q.ordinal}-${Date.now()}.${ext}`;
+  toast('Uploading image…');
+  try {
+    const { error } = await sb.storage.from('question-images').upload(path, file, { upsert: true, contentType: file.type });
+    if (error) throw error;
+    if (q.image_path && q.image_path !== path){ try { sb.storage.from('question-images').remove([q.image_path]); } catch(e){} }
+    if (q._imgURL){ try { URL.revokeObjectURL(q._imgURL); } catch(e){} }
+    q.image_path = path;
+    q._imgURL = URL.createObjectURL(file);
+    toast('Image attached', 'ok');
+    renderAdmin();
+  } catch(e){ toast('Upload failed: ' + (e.message || e), 'err'); }
+}
+function asmtRemoveImage(i){
+  const q = state.asmt.questions[i]; if (!q) return;
+  if (q.image_path){ try { sb.storage.from('question-images').remove([q.image_path]); } catch(e){} }
+  if (q._imgURL){ try { URL.revokeObjectURL(q._imgURL); } catch(e){} }
+  q.image_path = null; q._imgURL = null;
+  renderAdmin();
 }
 function asmtPreviewControls(q){
   const dis = 'style="pointer-events:none;opacity:.85"';
@@ -495,7 +593,9 @@ async function asmtDoDeploy(){
 
   const payload = A.questions.map(q => ({
     ordinal: q.ordinal, type: q.type, prompt: q.prompt,
-    level: q.level, competency: q.competency, marks: q.marks, options: q.options
+    level: q.level, competency: q.competency, marks: q.marks,
+    image_path: q.image_path || null,
+    options: q.options
   }));
 
   try {
