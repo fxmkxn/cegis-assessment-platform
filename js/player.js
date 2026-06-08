@@ -51,9 +51,14 @@ function pTasks(){
         <div style="flex:1"><b>${t.name}</b><div class="muted small">${sub} · submitted</div></div>
         <span class="pill closed">Completed</span></div>`;
     const verb = t.attempt_status === 'in_progress' ? 'Resume' : 'Begin';
+    // Fresh starts go through the instructions gate first; a resume drops straight
+    // back in (the attempt — and its deadline — already started server-side).
+    const launch = t.attempt_status === 'in_progress'
+      ? "startPlayerForAssessment('" + t.id + "')"
+      : "playerInstructions('" + t.id + "')";
     return `<div class="task"><div class="ic2">✎</div>
       <div style="flex:1"><b>${t.name}</b><div class="muted small">${sub}${t.attempt_status==='in_progress'?' · in progress':''}</div></div>
-      <button class="btn" onclick="startPlayerForAssessment('${t.id}')">${verb} →</button></div>`;
+      <button class="btn" onclick="${launch}">${verb} →</button></div>`;
   };
   return `<div class="page-head"><h1 id="pWelcome">Welcome back, ${typeof _escP==='function'?_escP(first):first}</h1></div>
     <h3 style="margin-bottom:12px">Do now</h3>
@@ -72,6 +77,35 @@ function playerLoading(msg){ return `<div class="oct-loading"><div class="oct-ms
 
 /* ---------------- Start / resume an attempt ---------------- */
 function startPlayer(){ pgo('tasks'); }
+
+/* ---------------- Pre-start instructions gate ----------------
+   Shown before a fresh Begin so the rules are read BEFORE the attempt
+   (and its server deadline) starts. "Begin assessment" is what actually
+   calls start_player_assessment, so the clock never ticks while reading. */
+function playerInstructions(assessmentId){
+  ensurePlayerStyles();
+  const t = (state.tasks || []).find(x => x.id === assessmentId);
+  if (!t){ startPlayerForAssessment(assessmentId); return; }   // no metadata — just start
+  const esc = (typeof _escP === 'function') ? _escP : (s => String(s == null ? '' : s));
+  const timed = !!t.time_limit_minutes;
+  const meta = `${t.question_count} question${t.question_count === 1 ? '' : 's'} · ${timed ? t.time_limit_minutes + ' minute limit' : 'no time limit'}`;
+  layout.innerHTML = `<div style="flex:1;display:flex;flex-direction:column;min-height:0"><div class="main">
+    <div class="player-wrap" style="max-width:600px;margin:0 auto">
+      <button class="btn ghost sm" onclick="pgo('tasks')" style="margin-bottom:14px">← Back to tasks</button>
+      <div class="card pad">
+        <h1 style="font-size:20px;margin-bottom:4px">${esc(t.name)}</h1>
+        <div class="muted small" style="margin-bottom:18px">${meta}</div>
+        <div class="badge warn" style="font-size:13px;padding:7px 12px;margin-bottom:14px">⚠ Please read before you begin</div>
+        <p style="margin:0 0 10px;line-height:1.6">Do not change tabs, minimise, or close the window.</p>
+        ${timed ? `<p style="margin:0 0 10px;line-height:1.6">Assessment attempts are timed (<b>${t.time_limit_minutes} minutes</b>), and the moment time runs out, it will be auto-submitted.</p>` : ''}
+        ${t.proctored === true ? `<p class="muted small" style="margin:0 0 4px">Leaving the assessment window is recorded; repeated violations will auto-submit your attempt.</p>` : ''}
+        <div class="flex jb ac wrap g12" style="margin-top:20px">
+          <span class="muted small">Once you begin${timed ? ', the timer starts immediately' : ''}.</span>
+          <button class="btn" onclick="startPlayerForAssessment('${t.id}')">Begin assessment →</button>
+        </div>
+      </div>
+    </div></div>`;
+}
 
 async function startPlayerForAssessment(assessmentId){
   ensurePlayerStyles();
