@@ -209,21 +209,36 @@ function validateAssessment(rows, map, format){
   return { questions, errors, warnings };
 }
 
-/* ---------- wizard view (overrides the prototype stub) ---------- */
+/* ---------- wizard view (overrides the prototype stub) ----------
+ * Steps are keyed (not raw indices) so the technical flow can carry an extra
+ * "Objectives" step between Preview and Deploy while WPCA keeps four steps. */
+function asmtStepKeys(A){
+  return A.kind === 'wpca'
+    ? ['upload','validate','preview','deploy']
+    : ['upload','validate','preview','objectives','deploy'];   // #2 objectives step
+}
+const ASMT_STEP_LABELS = { upload:'Upload file', validate:'Validate & fix', preview:'Preview', objectives:'Objectives', deploy:'Deploy' };
+function asmtNextStep(){ const A=state.asmt; A.step = Math.min(asmtStepKeys(A).length-1, (A.step||0)+1); renderAdmin(); }
+function asmtPrevStep(){ const A=state.asmt; A.step = Math.max(0, (A.step||0)-1); renderAdmin(); }
+
 function vAssessments(){
   const A = state.asmt || (state.asmt = { kind:'technical', stage:'eoca', name:'', step:0, creating:false });
   if (!A.creating) return asmtListView();          // list-first; the wizard is opened via ＋ New assessment
+  const keys = asmtStepKeys(A);
+  if (A.step >= keys.length) A.step = keys.length - 1;
   state.uploadStep = A.step;
-  const steps = ['Upload file','Validate & fix','Preview','Deploy'];
+  const key = keys[A.step] || 'upload';
+
   let stepper = '<div class="stepper">';
-  steps.forEach((s,i)=>{ stepper += `<div class="step ${A.step===i?'active':A.step>i?'done':''}">
-    <span class="n">${A.step>i?'✓':i+1}</span>${s}</div>${i<3?'<span class="arrow">→</span>':''}`; });
+  keys.forEach((k,i)=>{ stepper += `<div class="step ${A.step===i?'active':A.step>i?'done':''}">
+    <span class="n">${A.step>i?'✓':i+1}</span>${ASMT_STEP_LABELS[k]}</div>${i<keys.length-1?'<span class="arrow">→</span>':''}`; });
   stepper += '</div>';
 
   let body;
-  if (A.step === 0) body = asmtUploadView(A);
-  else if (A.step === 1) body = asmtValidateView(A);
-  else if (A.step === 2) body = asmtPreviewView(A);
+  if (key === 'upload') body = asmtUploadView(A);
+  else if (key === 'validate') body = asmtValidateView(A);
+  else if (key === 'preview') body = asmtPreviewView(A);
+  else if (key === 'objectives') body = asmtObjectivesView(A);
   else body = asmtDeployView(A);
 
   return `<div class="crumb">Assessments / New</div>
@@ -239,7 +254,7 @@ function vAssessments(){
 function asmtListView(){
   return `<div class="crumb">Manage / Assessments</div>
     <div class="page-head"><h1>Assessments</h1>
-      <button class="btn" onclick="asmtNew()">＋ New assessment</button></div>
+      <div class="flex g12 ac">${typeof histBtn==='function'?histBtn():''}<button class="btn" onclick="asmtNew()">＋ New assessment</button></div></div>
     <div id="asmtListBody"><div class="card pad"><p class="muted small" style="margin:0">Loading…</p></div></div>`;
 }
 function asmtNew(){
@@ -276,7 +291,7 @@ function renderAsmtList(list){
     <td>${_asmtEsc((a.stage||'').toUpperCase())}</td>
     <td><span class="pill ${pillClass(a.status)}">${_asmtEsc(a.status||'draft')}</span></td>
     <td class="muted small">${fmt(a.opens_at)} → ${fmt(a.closes_at)}</td>
-    <td style="text-align:right"><button class="btn ghost sm" onclick="asmtDelete('${a.id}')">Delete</button></td>
+    <td style="text-align:right">${a.kind==='technical'?`<button class="btn ghost sm" onclick="asmtOpenObjectives('${a.id}','${_asmtEsc(a.name).replace(/'/g,"\\'")}')">Objectives</button> `:''}<button class="btn ghost sm" onclick="asmtDelete('${a.id}')">Delete</button></td>
   </tr>`).join('');
   return `<div class="card">
     <div class="pad" style="border-bottom:1px solid var(--g200)"><div class="flex jb ac"><h3>Assessments in this cohort</h3><span class="muted small">${list.length} created</span></div></div>
@@ -438,7 +453,7 @@ function asmtPreviewView(A){
     ${cards}
     <div class="flex g12" style="margin-top:16px;justify-content:flex-end">
       <button class="btn ghost" onclick="state.asmt.step=1;renderAdmin()">← Back</button>
-      <button class="btn" onclick="state.asmt.step=3;renderAdmin()">Continue to deploy →</button></div>`;
+      <button class="btn" onclick="asmtNextStep()">Continue →</button></div>`;
 }
 
 // One editable question card: type tag, text editor with a B/I/↵ toolbar,
@@ -545,6 +560,131 @@ function asmtPreviewControls(q){
   return `<div ${dis}>`+q.options.map(o=>`<div class="opt"><span class="rd"></span>${o.label}</div>`).join('')+`</div>`;
 }
 
+/* ============================================================
+   #2 OBJECTIVES  — map each competency code used by the instrument to a
+   full objective title (+ optional learning outcome). Prospective: a wizard
+   step between Preview and Deploy. Retrospective: a modal off the list.
+   ============================================================ */
+function asmtDistinctCodes(questions){
+  const seen = new Set(), out = [];
+  (questions || []).forEach(q => (q.competency || []).forEach(c => {
+    const t = String(c == null ? '' : c).trim();
+    if (t && !seen.has(t.toLowerCase())) { seen.add(t.toLowerCase()); out.push(t); }
+  }));
+  return out;
+}
+// live edit store keyed by array index (codes can contain spaces/quotes)
+function asmtSetObj(i, field, val){
+  const A = state.asmt; const code = (A.objCodes || [])[i]; if (code == null) return;
+  A.objMap = A.objMap || {};
+  A.objMap[code] = A.objMap[code] || { title:'', learning_outcome:'' };
+  A.objMap[code][field] = val;
+}
+function asmtCollectObjectives(){
+  const A = state.asmt, out = [];
+  (A.objCodes || []).forEach((code, idx) => {
+    const o = (A.objMap || {})[code] || {};
+    if (o.title && o.title.trim()){
+      out.push({ code, title: o.title.trim(),
+                 learning_outcome: (o.learning_outcome || '').trim() || null, ordinal: idx + 1 });
+    }
+  });
+  return out;
+}
+function asmtObjectivesView(A){
+  A.objCodes = asmtDistinctCodes(A.questions);
+  A.objMap = A.objMap || {};
+  A.objCodes.forEach(c => { A.objMap[c] = A.objMap[c] || { title:'', learning_outcome:'' }; });
+  const rows = A.objCodes.length
+    ? A.objCodes.map((c,i) => `<div class="card pad" style="margin-bottom:12px">
+        <span class="tag">${_asmtEsc(c)}</span>
+        <input id="wobj_t_${i}" placeholder="Objective title — shown in reports instead of &quot;${_asmtEsc(c)}&quot;"
+          value="${_asmtEsc(A.objMap[c].title||'')}" oninput="asmtSetObj(${i},'title',this.value)"
+          style="width:100%;margin-top:8px;padding:10px 12px;border:1.5px solid var(--g300);border-radius:9px;font:inherit">
+        <textarea id="wobj_o_${i}" rows="2" placeholder="Learning outcome (optional)"
+          oninput="asmtSetObj(${i},'learning_outcome',this.value)"
+          style="width:100%;margin-top:8px;padding:10px 12px;border:1.5px solid var(--g300);border-radius:9px;font:inherit;resize:vertical">${_asmtEsc(A.objMap[c].learning_outcome||'')}</textarea>
+      </div>`).join('')
+    : `<div class="card pad"><p class="muted small" style="margin:0">No competency tags were found in these questions, so there are no objectives to define — you can continue to deploy.</p></div>`;
+  return `<div class="card pad" style="margin-bottom:14px"><div class="flex ac g12"><span class="badge info">i</span>
+      <div>Map each competency code in this instrument to a full objective (and optionally a learning outcome). Reports show the objective title instead of the code. You can edit these later from the assessment list.</div></div></div>
+    ${rows}
+    <div class="flex g12" style="margin-top:16px;justify-content:flex-end">
+      <button class="btn ghost" onclick="asmtPrevStep()">← Back</button>
+      <button class="btn" onclick="asmtNextStep()">Continue to deploy →</button></div>`;
+}
+
+/* retrospective: open the same editor for an already-deployed assessment */
+async function asmtOpenObjectives(assessmentId, name){
+  toast('Loading objectives…');
+  try {
+    const { data, error } = await sb.rpc('get_objectives', { p_assessment_id: assessmentId });
+    if (error) throw error;
+    const codes = (data && data.codes) || [];
+    const existing = {};
+    ((data && data.objectives) || []).forEach(o => { existing[o.code] = { title:o.title||'', learning_outcome:o.learning_outcome||'' }; });
+    asmtObjModal(assessmentId, name, codes, existing);
+  } catch(e){ toast('Could not load objectives: ' + (e.message || e), 'err'); }
+}
+function asmtObjModal(assessmentId, name, codes, existing){
+  const all = codes.slice();
+  Object.keys(existing).forEach(c => { if (!all.some(x => x.toLowerCase() === c.toLowerCase())) all.push(c); });
+  window.__objEdit = { assessmentId, codes: all, map: {} };
+  all.forEach(c => { window.__objEdit.map[c] = existing[c] ? { title:existing[c].title||'', learning_outcome:existing[c].learning_outcome||'' } : { title:'', learning_outcome:'' }; });
+  const rows = all.length
+    ? all.map((c,i) => `<div class="card pad" style="margin-bottom:10px">
+        <span class="tag">${_asmtEsc(c)}</span>
+        <input id="obr_t_${i}" placeholder="Objective title" value="${_asmtEsc(window.__objEdit.map[c].title)}"
+          oninput="asmtObjEdit(${i},'title',this.value)"
+          style="width:100%;margin-top:8px;padding:10px 12px;border:1.5px solid var(--g300);border-radius:9px;font:inherit">
+        <textarea id="obr_o_${i}" rows="2" placeholder="Learning outcome (optional)"
+          oninput="asmtObjEdit(${i},'learning_outcome',this.value)"
+          style="width:100%;margin-top:8px;padding:10px 12px;border:1.5px solid var(--g300);border-radius:9px;font:inherit;resize:vertical">${_asmtEsc(window.__objEdit.map[c].learning_outcome)}</textarea>
+      </div>`).join('')
+    : '<p class="muted small">No competency tags on this assessment, so there are no objectives to define.</p>';
+  showModal({
+    title: `Objectives — ${_asmtEsc(name)}`,
+    body: `<div class="muted small" style="margin-bottom:10px">Give each competency code a full objective title (shown in reports instead of the code) and an optional learning outcome.</div>
+      <div style="max-height:52vh;overflow:auto">${rows}</div>`,
+    confirm: all.length ? 'Save objectives' : null,
+    onConfirm: all.length ? asmtObjModalSave : null
+  });
+}
+function asmtObjEdit(i, field, val){
+  const E = window.__objEdit; if (!E) return;
+  const code = E.codes[i]; if (code == null) return;
+  E.map[code] = E.map[code] || {}; E.map[code][field] = val;
+}
+async function asmtObjModalSave(){
+  const E = window.__objEdit; if (!E) return;
+  const rows = E.codes.map((c,idx) => {
+    const o = E.map[c] || {};
+    return (o.title && o.title.trim())
+      ? { code:c, title:o.title.trim(), learning_outcome:(o.learning_outcome||'').trim() || null, ordinal:idx+1 }
+      : null;
+  }).filter(Boolean);
+  closeModal();
+  try {
+    const { error } = await sb.rpc('set_objectives', { p_assessment_id: E.assessmentId, p_rows: rows });
+    if (error) throw error;
+    toast('Objectives saved', 'ok');
+  } catch(e){ toast('Save failed: ' + (e.message || e), 'err'); }
+}
+
+/* ============================================================
+   #12 PROCTORING toggles (deploy step)
+   ============================================================ */
+function asmtDefaultProctoring(){ return { tab_switch:true, copy_paste:true, right_click:true, devtools:true, fullscreen:true, nav_guard:true }; }
+function asmtProctoringObj(A){ return A.proctoring || asmtDefaultProctoring(); }
+function asmtAnyProctor(A){ const p = asmtProctoringObj(A); return Object.keys(p).some(k => p[k]); }
+function asmtSetProctor(key, val){ const A = state.asmt; A.proctoring = A.proctoring || asmtDefaultProctoring(); A.proctoring[key] = val; }
+function asmtProctorToggle(key, label){
+  const A = state.asmt; A.proctoring = A.proctoring || asmtDefaultProctoring();
+  const on = A.proctoring[key] !== false;
+  return `<label class="kv ac" style="cursor:pointer"><span class="muted">${label}</span>
+    <input type="checkbox" ${on?'checked':''} onchange="asmtSetProctor('${key}',this.checked)" style="width:18px;height:18px"></label>`;
+}
+
 function asmtDeployView(A){
   if (!A.opensAt){ const d=new Date(); A.opensAt = d.toISOString().slice(0,10); }
   if (!A.closesAt){ const d=new Date(Date.now()+14*864e5); A.closesAt = d.toISOString().slice(0,10); }
@@ -564,11 +704,23 @@ function asmtDeployView(A){
     <div class="kv ac"><span class="muted">Release</span>
       <select class="cohort-sel" onchange="state.asmt.deployStatus=this.value">
         <option value="live">Live now</option><option value="scheduled">Scheduled (opens on date)</option></select></div>
-    <div class="kv ac"><span class="muted">Auto-submit if the participant leaves the tab</span>
-      <input type="checkbox" ${A.proctored!==false?'checked':''} onchange="state.asmt.proctored=this.checked"
-             style="width:18px;height:18px"></div>
+    <div style="margin-top:12px">
+      <div class="muted small" style="font-weight:600;margin-bottom:6px">Participant instructions (optional)</div>
+      <textarea id="asmtInstr" rows="3" oninput="state.asmt.instructions=this.value"
+        placeholder="Shown before the participant begins. Leave blank to use the default instructions. **bold**, *italic* and line breaks are supported."
+        style="width:100%;padding:11px 13px;border:1.5px solid var(--g300);border-radius:10px;font:inherit;line-height:1.5;resize:vertical">${_asmtEsc(A.instructions||'')}</textarea>
+    </div>
+    <div style="margin-top:14px">
+      <div class="muted small" style="font-weight:600;margin-bottom:2px">Proctoring</div>
+      ${asmtProctorToggle('tab_switch','Auto-submit if the participant leaves the tab / window')}
+      ${asmtProctorToggle('fullscreen','Require full screen (exiting counts as a violation)')}
+      ${asmtProctorToggle('copy_paste','Block copy / cut / paste')}
+      ${asmtProctorToggle('right_click','Block right-click / context menu')}
+      ${asmtProctorToggle('devtools','Block developer tools &amp; save/print shortcuts')}
+      ${asmtProctorToggle('nav_guard','Warn before leaving or closing the page')}
+    </div>
     <div class="flex g12" style="margin-top:18px">
-      <button class="btn ghost" onclick="state.asmt.step=2;renderAdmin()">← Back</button>
+      <button class="btn ghost" onclick="asmtPrevStep()">← Back</button>
       <button class="btn" onclick="asmtConfirmDeploy()">Deploy to cohort</button></div>
     <p class="muted small" style="margin-top:12px">⚠ Deployment is participant-visible and cannot be undone once released.</p></div>`;
 }
@@ -620,7 +772,9 @@ async function asmtDoDeploy(){
       p_closes_at: A.closesAt ? new Date(A.closesAt).toISOString() : null,
       p_status: status,
       p_time_limit_minutes: Number.isFinite(tl) && tl > 0 ? tl : null,
-      p_proctored: A.proctored !== false
+      p_proctored: asmtAnyProctor(A),
+      p_instructions: (A.instructions && A.instructions.trim()) ? A.instructions : null,
+      p_proctoring: asmtProctoringObj(A)
     });
     if (depErr){
       toast('Imported as draft, but deploy failed: ' + depErr.message, 'err');
@@ -630,6 +784,17 @@ async function asmtDoDeploy(){
     }
 
     toast(`${A.name} deployed (${imp.question_count} questions)`, 'ok');
+
+    // #2 persist objectives now that we have the assessment id (technical only)
+    if (A.kind === 'technical'){
+      const objs = asmtCollectObjectives();
+      if (objs.length){
+        try {
+          const { error: oErr } = await sb.rpc('set_objectives', { p_assessment_id: assessmentId, p_rows: objs });
+          if (oErr) throw oErr;
+        } catch(e){ toast('Deployed, but saving objectives failed: ' + (e.message || e), 'err'); }
+      }
+    }
     _asmtListCache = { cid:null, list:null };
     state.asmt = { kind:'technical', stage:'eoca', name:'', step:0, creating:false };
     go('assessments');

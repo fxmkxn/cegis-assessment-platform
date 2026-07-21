@@ -2,14 +2,95 @@
 
 /* ---------------- PARTICIPANT ---------------- */
 function renderParticipant(){
-  const tabs=[['tasks','My Tasks'],['t360','My 360 Tasks'],['reports','My Reports'],['profile','Profile']];
+  const show360 = _has360Tab();
+  // #10 only surface the 360 tab when the participant actually has reviews to give
+  if(!show360 && state.ptab==='t360') state.ptab='tasks';
+  const tabs=[['tasks','My Tasks']];
+  if(show360) tabs.push(['t360','My 360 Tasks']);
+  tabs.push(['reports','My Reports'],['profile','Profile']);
   let tb='<div class="ptabs">'; tabs.forEach(([k,l])=>tb+=`<button class="${state.ptab===k?'active':''}" onclick="pgo('${k}')">${l}</button>`); tb+='</div>';
   const views={tasks:pTasks,player:pPlayer,t360:p360,reports:pReport,profile:pProfile};
   const showTabs=state.ptab!=='player';
-  layout.innerHTML=`<div style="flex:1;display:flex;flex-direction:column;min-height:0">${showTabs?tb:''}<div class="main">${(views[state.ptab]||pTasks)()}</div></div>`;
+  layout.innerHTML=`<div style="flex:1;display:flex;flex-direction:column;min-height:0">${showTabs?(_pcohortBar()+tb):''}<div class="main">${(views[state.ptab]||pTasks)()}</div></div>`;
   if(state.ptab==='reports') initReportScroll();
   if(state.ptab==='profile') loadProfile();
   if(state.ptab==='tasks') loadMyName();
+}
+
+/* #10 whether to show "My 360 Tasks". DEMO mode keeps it visible so the prototype
+   flow stays reachable; in live mode we hide it until we've confirmed the signed-in
+   participant has at least one 360 panel to rate. The result is cached on `state`,
+   so this costs a single lightweight query per session (recheck needs a reload). */
+function _has360Tab(){
+  if(!(typeof AUTH!=='undefined' && AUTH.session && !AUTH.demo)) return true;
+  if(state.has360===undefined){
+    if(!state._has360Loading){
+      state._has360Loading=true;
+      _check360().then(v=>{
+        state.has360=v; state._has360Loading=false;
+        if(state.role!=='admin') renderParticipant();
+      });
+    }
+    return false;   // hide until we know
+  }
+  return !!state.has360;
+}
+async function _check360(){
+  // #13 multi-cohort: "My 360 Tasks" reflects EVERY review this person owes,
+  // across all their cohorts (360 is intentionally NOT cohort-scoped by the
+  // switcher). list_my_360_tasks already spans every panel they rate, so it's
+  // both the visibility check and a seed for p360 (avoids a second load).
+  try{
+    const { data, error }=await sb.rpc('list_my_360_tasks');
+    if(error) return false;
+    const tasks=data||[];
+    if(typeof WPCA!=='undefined' && WPCA) WPCA.tasks=tasks;   // seed the 360 tab
+    return tasks.length>0;
+  }catch(e){ return false; }
+}
+
+/* #13 participant cohort switcher. A person may belong to several cohorts;
+   Tasks and Reports are scoped to ONE at a time. We default to the most-recent
+   cohort (my_cohorts() returns them newest-first) and only render the selector
+   when there's an actual choice. 360 stays global (see _check360). */
+function _pcohortBar(){
+  // demo/prototype runs on a single sample cohort — no switcher needed
+  if(!(typeof AUTH!=='undefined' && AUTH.session && !AUTH.demo)) return '';
+  if(state.pcohorts===undefined){
+    if(!state._pcohortsLoading){ state._pcohortsLoading=true; _loadPCohorts(); }
+    return '';   // load quietly; avoid a flash of a half-populated control
+  }
+  if(!state.pcohorts || state.pcohorts.length<2) return '';   // nothing to switch between
+  const opts=state.pcohorts.map(c=>
+    `<option value="${_escP(c.id)}"${c.id===state.pcohort?' selected':''}>${_escP(c.name)}</option>`).join('');
+  return `<div style="display:flex;align-items:center;gap:8px;padding:8px 2px 0">
+    <span class="muted small">Cohort</span>
+    <select onchange="pSwitchCohort(this.value)"
+      style="padding:6px 8px;border:1px solid var(--g300,#cbd5e1);border-radius:8px;font-size:13px;background:#fff">
+      ${opts}</select></div>`;
+}
+function _loadPCohorts(){
+  sb.rpc('my_cohorts').then(({data,error})=>{
+    state._pcohortsLoading=false;
+    state.pcohorts=error?[]:(data||[]);
+    if(!state.pcohort && state.pcohorts.length) state.pcohort=state.pcohorts[0].id;  // most recent
+    if(state.role!=='admin') renderParticipant();
+  }).catch(()=>{
+    state._pcohortsLoading=false; state.pcohorts=[];
+    if(state.role!=='admin') renderParticipant();
+  });
+}
+function pSwitchCohort(id){
+  if(!id || id===state.pcohort) return;
+  state.pcohort=id;
+  // re-scope the cohort-specific surfaces; 360 (global) is deliberately untouched.
+  state.tasks=undefined; state.tasksLoading=false;                         // assessment tasks reload
+  if(typeof REPORTS!=='undefined' && REPORTS){                             // self report re-resolves
+    REPORTS.selfPid=null; REPORTS.selfSubject=null;
+    REPORTS.selfContent=null; REPORTS.selfState='idle';
+  }
+  renderParticipant();
+  const m=document.querySelector('.main'); if(m) m.scrollTo(0,0);
 }
 function pgo(k){state.ptab=k;if(k!=='player')state.inReview=false;renderParticipant();const m=document.querySelector('.main');if(m)m.scrollTo(0,0);}
 
@@ -35,7 +116,7 @@ async function loadMyName(){
     if(data && data.name){
       _meName=data.name;
       const h=document.getElementById('pWelcome');
-      if(h) h.textContent='Welcome back, '+_escP(_meName.split(/\s+/)[0]);
+      if(h) h.textContent='Welcome!';
     }
   }catch(e){/* keep the best-guess greeting */}
 }

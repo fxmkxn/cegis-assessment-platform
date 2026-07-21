@@ -39,6 +39,7 @@ var REPORTS_PROTO = {
 
 var REPORTS = {
   selfPid:     null,    // the logged-in participant's id (My Reports)
+  _selfPidCohort: undefined, // #13 which cohort selfPid was resolved for
   selfContent: null,    // cached persisted content for self
   selfState:   'idle',  // idle | loading | none | ready | generating
   adminView:   null,    // { pid, name, content } when an admin opens one
@@ -132,12 +133,17 @@ function renderReportFrom(content, opts){
   const backBtn = opts.admin
     ? `<button class="btn ghost sm" onclick="REPORTS.adminView=null;renderAdmin()">← All reports</button>` : '';
   const genAt = content.generated_at ? new Date(content.generated_at).toLocaleString() : '';
+  // #8 branding: baked into content for reports generated after this change;
+  // for older reports (no content.branding) we patch it in live after paint.
+  const brand = content.branding || null;
+  if (!brand) setTimeout(() => reportsBrandFallback(opts), 0);
 
   return `<div class="report-wrap"><div class="grid" style="grid-template-columns:180px 1fr;align-items:start">
     <div class="section-nav" id="secNav">
       <a href="#summary" class="on">Summary</a><a href="#technical">Technical progression</a>
       <a href="#behavioral">Behavioral 360</a><a href="#themes">Strengths &amp; gaps</a><a href="#recs">Recommendations</a></div>
     <div id="reportRoot">
+      <div id="reportBrand">${reportsBrandBarHtml(brand)}</div>
       <div class="flex jb ac" style="margin-bottom:16px">
         <div class="crumb">${opts.admin?'Reports / '+rEsc(s.name||''):'My Reports / Comprehensive'}</div>
         <div class="flex g8 ac">${backBtn}${regenBtn}
@@ -180,6 +186,52 @@ function renderReportFrom(content, opts){
 }
 
 /* ============================================================
+   #8 REPORT BRANDING HEADER
+   Ministry/department logo + label at the top of the report (inside
+   #reportRoot, so it is captured by the PDF export). New reports carry
+   content.branding; older ones are resolved live from current org/cohort
+   branding and patched into #reportBrand after paint.
+   ============================================================ */
+function reportsBrandUrl(path){
+  if (!path) return null;
+  const base = (window.CONFIG && window.CONFIG.SUPABASE_URL) || '';
+  return base.replace(/\/+$/, '') + '/storage/v1/object/public/org-branding/' + path;
+}
+function reportsBrandBarHtml(b){
+  if (!b) return '';
+  const label = b.label ? rEsc(b.label) : '';
+  const sub   = b.sublabel ? rEsc(b.sublabel) : '';
+  const logo  = reportsBrandUrl(b.logo_path);
+  if (!label && !sub && !logo) return '';
+  return `<div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid var(--g200)">`
+    + (logo ? `<img src="${logo}" alt="" style="height:40px;width:auto;display:block" onerror="this.style.display='none'">` : '')
+    + `<div>${label ? `<div style="font-weight:700;color:var(--g800);line-height:1.2">${label}</div>` : ''}`
+    + `${sub ? `<div style="font-size:12px;color:var(--g500);margin-top:1px">${sub}</div>` : ''}</div></div>`;
+}
+async function reportsBrandFallback(opts){
+  const host = document.getElementById('reportBrand');
+  if (!host || !reportsLive()) return;
+  try {
+    // resolve the report's cohort so a per-cohort override can apply
+    let cohortId = null;
+    if ((!opts || !opts.admin) && REPORTS.selfSubject && REPORTS.selfSubject.cohort_id){
+      cohortId = REPORTS.selfSubject.cohort_id;
+    }
+    if (!cohortId && opts && opts.pid){
+      const { data } = await sb.from('participants').select('cohort_id').eq('id', opts.pid).maybeSingle();
+      cohortId = data ? data.cohort_id : null;
+    }
+    const { data: org } = await sb.from('organizations').select('brand').limit(1).maybeSingle();
+    let brand = (org && org.brand) || {};
+    if (cohortId){
+      const { data: coh } = await sb.from('cohorts').select('brand').eq('id', cohortId).maybeSingle();
+      if (coh && coh.brand) brand = Object.assign({}, brand, coh.brand);
+    }
+    host.innerHTML = reportsBrandBarHtml(brand);
+  } catch (e){ /* leave the header unbranded on failure */ }
+}
+
+/* ============================================================
    PARTICIPANT — My Reports
    ============================================================ */
 function pReport(){
@@ -203,14 +255,22 @@ function pReport(){
 }
 
 async function reportsResolveSelfPid(){
-  if(REPORTS.selfPid) return REPORTS.selfPid;
+  // #13 a person may have a participant row in several cohorts. Pick the row for
+  // the switcher's selected cohort; fall back to the most-recent row when none is
+  // selected yet. Cache is keyed by cohort so switching re-resolves cleanly.
+  const want = (window.state && state.pcohort) || null;
+  if(REPORTS.selfPid && REPORTS._selfPidCohort===want) return REPORTS.selfPid;
   let uid = (window.AUTH && window.AUTH.uid) || null;
   if(!uid){ try{ const g=await sb.auth.getUser(); uid=g.data&&g.data.user?g.data.user.id:null; }catch(e){} }
   if(!uid) return null;
-  const { data } = await sb.from('participants')
-    .select('id,name,designation,workstream,location,cohort_id')
-    .eq('user_id', uid).is('deleted_at', null).maybeSingle();
-  if(data){ REPORTS.selfPid=data.id; REPORTS.selfSubject=data; }
+  const { data:rows } = await sb.from('participants')
+    .select('id,name,designation,workstream,location,cohort_id,created_at')
+    .eq('user_id', uid).is('deleted_at', null)
+    .order('created_at',{ascending:false});
+  if(!rows || !rows.length) return null;
+  let pick = want ? rows.find(r=>r.cohort_id===want) : null;
+  if(!pick) pick = rows[0];   // most-recent enrollment
+  REPORTS.selfPid=pick.id; REPORTS.selfSubject=pick; REPORTS._selfPidCohort=want;
   return REPORTS.selfPid;
 }
 async function reportsHydrateSelf(){

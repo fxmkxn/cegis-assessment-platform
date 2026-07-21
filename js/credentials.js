@@ -107,7 +107,8 @@ async function invokeGenerateCredentials(cohortId, mode) {
 function renderCredentialResults(res, cohortName) {
   const made = (res.created || 0) + (res.invited || 0);
   const verb = res.mode === 'invite' ? 'invited' : 'created';
-  toast(`${made} ${verb}` + (res.skipped ? `, ${res.skipped} skipped` : '') +
+  toast(`${made} ${verb}` + (res.linked ? `, ${res.linked} linked` : '') +
+    (res.skipped ? `, ${res.skipped} skipped` : '') +
     (res.failed ? `, ${res.failed} failed` : ''), res.failed ? 'err' : 'ok');
 
   const withPw = (res.results || []).filter((r) => r.status === 'created' && r.password);
@@ -115,12 +116,16 @@ function renderCredentialResults(res, cohortName) {
   let rows = (res.results || []).map((r) => {
     const badge = r.status === 'created' || r.status === 'invited'
       ? `<span class="badge ok">${r.status}</span>`
-      : r.status === 'skipped'
-        ? `<span class="badge warn">skipped${r.reason ? ' · ' + r.reason : ''}</span>`
-        : `<span class="badge err">failed${r.reason ? ' · ' + r.reason : ''}</span>`;
+      : r.status === 'linked'
+        ? `<span class="badge ok">linked</span>`
+        : r.status === 'skipped'
+          ? `<span class="badge warn">skipped${r.reason ? ' · ' + r.reason : ''}</span>`
+          : `<span class="badge err">failed${r.reason ? ' · ' + r.reason : ''}</span>`;
     const pw = r.password
       ? `<code style="font-size:12.5px;background:var(--g100);padding:2px 7px;border-radius:6px">${r.password}</code>`
-      : '<span class="muted small">—</span>';
+      : r.status === 'linked'
+        ? '<span class="muted small">existing login reused</span>'
+        : '<span class="muted small">—</span>';
     return `<tr><td><b>${r.name || '—'}</b></td><td class="muted small">${r.email || '—'}</td>` +
       `<td>${badge}</td><td>${pw}</td></tr>`;
   }).join('');
@@ -145,9 +150,10 @@ function renderCredentialResults(res, cohortName) {
      <div class="page-head"><h1>Credentials — ${cohortName || ''}</h1>
        <div class="flex g12 ac">${dl}<button class="btn ghost" onclick="go('roster')">← Back to cohort</button></div></div>
      ${warn}
-     <div class="grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:18px">
+     <div class="grid" style="grid-template-columns:repeat(5,1fr);margin-bottom:18px">
        <div class="card pad"><div style="font-size:24px;font-weight:700" class="tnum">${res.created || 0}</div><div class="muted small">Passwords created</div></div>
        <div class="card pad"><div style="font-size:24px;font-weight:700" class="tnum">${res.invited || 0}</div><div class="muted small">Invites sent</div></div>
+       <div class="card pad"><div style="font-size:24px;font-weight:700" class="tnum">${res.linked || 0}</div><div class="muted small">Linked (existing)</div></div>
        <div class="card pad"><div style="font-size:24px;font-weight:700" class="tnum">${res.skipped || 0}</div><div class="muted small">Skipped</div></div>
        <div class="card pad"><div style="font-size:24px;font-weight:700;color:${res.failed ? 'var(--err)' : 'inherit'}" class="tnum">${res.failed || 0}</div><div class="muted small">Failed</div></div>
      </div>

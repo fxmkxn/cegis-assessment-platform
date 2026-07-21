@@ -20,10 +20,27 @@ function ensurePlayerStyles(){
   s.id = 'playerStyles';
   s.textContent = `
     #playerTimer{font-size:22px;padding:8px 18px;font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:.5px}
+    /* #8 ministry/department branding bar shown while taking the assessment */
+    .player-brand{display:flex;align-items:center;gap:12px;max-width:1060px;margin:0 auto 16px;padding-bottom:12px;border-bottom:1px solid var(--g200)}
+    .player-brand img{height:40px;width:auto;display:block}
+    .player-brand .pb-label{font-weight:700;color:var(--g800);line-height:1.2}
+    .player-brand .pb-sub{font-size:12px;color:var(--g500);margin-top:1px}
     .player-grid{display:grid;grid-template-columns:1fr 250px;gap:24px;max-width:1060px;margin:0 auto;align-items:start}
     .nav-rail{position:sticky;top:6px}
     .nav-rail .review-grid{grid-template-columns:repeat(auto-fill,minmax(38px,1fr))}
-    @media(max-width:860px){.player-grid{grid-template-columns:1fr}.nav-rail{position:static}}
+    /* #11 exit/sign-out bar: shown top-left on desktop, moved to the bottom on mobile */
+    .player-exit-bottom{display:none}
+    @media(max-width:860px){
+      .player-grid{grid-template-columns:1fr}
+      .nav-rail{position:static;margin-top:18px}
+      .player-topbar{flex-wrap:wrap;gap:10px}
+      .player-exit-top{display:none}
+      .player-exit-bottom{display:flex;gap:10px;justify-content:space-between;align-items:center;
+        max-width:1060px;margin:22px auto 8px;padding-top:16px;border-top:1px solid var(--g200)}
+      .player-exit-bottom .btn{flex:1}
+      .likert{flex-wrap:wrap}
+      .likert button{flex:1 1 30%}
+    }
   `;
   document.head.appendChild(s);
 }
@@ -41,8 +58,13 @@ function pTasks(){
   const first = (typeof _meFirstSync === 'function')
     ? _meFirstSync()
     : (((typeof ME === 'function' ? ME().n : '') || 'there').split(/\s+/)[0]);
-  const live = state.tasks.filter(t => t.attempt_status !== 'submitted');
-  const done = state.tasks.filter(t => t.attempt_status === 'submitted');
+  // #13 scope to the selected cohort (the switcher lives in participant.js).
+  // Guard keeps older rows without cohort_id, and demo mode (pcohort unset), visible.
+  const scoped = state.pcohort
+    ? state.tasks.filter(t => !t.cohort_id || t.cohort_id === state.pcohort)
+    : state.tasks;
+  const live = scoped.filter(t => t.attempt_status !== 'submitted');
+  const done = scoped.filter(t => t.attempt_status === 'submitted');
   const card = t => {
     const mins = t.time_limit_minutes ? `${t.time_limit_minutes} min limit` : 'no time limit';
     const sub = `${t.question_count} questions · ${mins}`;
@@ -60,7 +82,7 @@ function pTasks(){
       <div style="flex:1"><b>${t.name}</b><div class="muted small">${sub}${t.attempt_status==='in_progress'?' · in progress':''}</div></div>
       <button class="btn" onclick="${launch}">${verb} →</button></div>`;
   };
-  return `<div class="page-head"><h1 id="pWelcome">Welcome back, ${typeof _escP==='function'?_escP(first):first}</h1></div>
+  return `<div class="page-head"><h1 id="pWelcome">Welcome!</h1></div>
     <h3 style="margin-bottom:12px">Do now</h3>
     ${live.length ? live.map(card).join('') : '<p class="muted">No assessments awaiting you right now.</p>'}
     ${done.length ? `<hr><h3 style="margin-bottom:12px">Completed</h3>${done.map(card).join('')}` : ''}`;
@@ -89,6 +111,14 @@ function playerInstructions(assessmentId){
   const esc = (typeof _escP === 'function') ? _escP : (s => String(s == null ? '' : s));
   const timed = !!t.time_limit_minutes;
   const meta = `${t.question_count} question${t.question_count === 1 ? '' : 's'} · ${timed ? t.time_limit_minutes + ' minute limit' : 'no time limit'}`;
+  // #6 admin-authored instructions (markdown) take over the body when present;
+  // otherwise show the default rules, tailored to the guards actually enabled (#12).
+  const pc = t.proctoring || {};
+  const leaveGuarded = pc.tab_switch !== false;   // undefined => treat as on (legacy)
+  const custom = (t.instructions && String(t.instructions).trim() !== '')
+    ? `<div style="line-height:1.6">${(typeof mdToSafeHtml==='function'?mdToSafeHtml(t.instructions):esc(t.instructions))}</div>`
+    : `<p style="margin:0 0 10px;line-height:1.6">Do not change tabs, minimise, or close the window.</p>
+       ${leaveGuarded ? `<p class="muted small" style="margin:0 0 4px">Leaving the assessment window is recorded; repeated violations will auto-submit your attempt.</p>` : ''}`;
   layout.innerHTML = `<div style="flex:1;display:flex;flex-direction:column;min-height:0"><div class="main">
     <div class="player-wrap" style="max-width:600px;margin:0 auto">
       <button class="btn ghost sm" onclick="pgo('tasks')" style="margin-bottom:14px">← Back to tasks</button>
@@ -96,9 +126,8 @@ function playerInstructions(assessmentId){
         <h1 style="font-size:20px;margin-bottom:4px">${esc(t.name)}</h1>
         <div class="muted small" style="margin-bottom:18px">${meta}</div>
         <div class="badge warn" style="font-size:13px;padding:7px 12px;margin-bottom:14px">⚠ Please read before you begin</div>
-        <p style="margin:0 0 10px;line-height:1.6">Do not change tabs, minimise, or close the window.</p>
-        ${timed ? `<p style="margin:0 0 10px;line-height:1.6">Assessment attempts are timed (<b>${t.time_limit_minutes} minutes</b>), and the moment time runs out, it will be auto-submitted.</p>` : ''}
-        <p class="muted small" style="margin:0 0 4px">Leaving the assessment window is recorded; repeated violations will auto-submit your attempt.</p>
+        ${custom}
+        ${timed ? `<p style="margin:10px 0 0;line-height:1.6">This attempt is timed (<b>${t.time_limit_minutes} minutes</b>); when the time runs out it is submitted automatically.</p>` : ''}
         <div class="flex jb ac wrap g12" style="margin-top:20px">
           <span class="muted small">Once you begin${timed ? ', the timer starts immediately' : ''}.</span>
           <button class="btn" onclick="startPlayerForAssessment('${t.id}')">Begin assessment →</button>
@@ -122,13 +151,20 @@ async function startPlayerForAssessment(assessmentId){
     const ans = {}, flags = {};
     (data.responses || []).forEach(r => { if (r.answer) ans[r.question_id] = r.answer; if (r.flagged) flags[r.question_id] = true; });
     const skewMs = data.attempt.server_now ? (new Date(data.attempt.server_now).getTime() - Date.now()) : 0;
+    // #12 granular proctoring config (fall back to the coarse flag for legacy rows)
+    const pcfg = data.assessment.proctoring || (data.assessment.proctored !== false
+      ? { tab_switch:true, copy_paste:true, right_click:true, devtools:true, fullscreen:true, nav_guard:true }
+      : { tab_switch:false, copy_paste:false, right_click:false, devtools:false, fullscreen:false, nav_guard:false });
+    const anyProctor = Object.keys(pcfg).some(k => pcfg[k]);
     state.player = {
       assessmentId, attemptId: data.attempt.id, name: data.assessment.name,
       questions: data.questions || [], answers: ans, flags,
       idx: 0, submitted: false, saveState: 'saved',
       deadlineAt: data.attempt.deadline_at ? new Date(data.attempt.deadline_at).getTime() : null,
       skewMs, dirty: {}, terminated: false, fsActive: false,
-      proctored: data.assessment.proctored !== false
+      proctoring: pcfg,                                   // #12 per-guard toggles
+      proctored: anyProctor,                              // any guard on at all
+      branding: data.assessment.branding || null          // #8 ministry/dept branding
     };
     if (state.player.proctored) attachProctoring();
     await loadQuestionImages(state.player.questions);
@@ -167,8 +203,9 @@ function pPlayer(){
   const ind = { saved:['','Saved'], saving:['saving','Saving…'], err:['err','Couldn’t save — retrying'] }[P.saveState] || ['','Saved'];
   const typeLabel = q.type==='fib'?'Fill in the blank':q.type==='tf'?'True / False':q.type==='multi'?'Select all that apply':q.type==='likert'?'Rating':'Multiple choice';
   return `<div>
-    <div class="flex jb ac" style="margin-bottom:16px">
-      <button class="btn ghost sm" onclick="exitPlayer()">✕ Save & exit</button>
+    ${playerBrandBar()}
+    <div class="flex jb ac player-topbar" style="margin-bottom:16px">
+      <span class="player-exit-top"><button class="btn ghost sm" onclick="exitPlayer()">✕ Save & exit</button></span>
       <div class="flex g12 ac">
         ${P.deadlineAt ? timerSpan() : ''}
         <span class="pill sched">${P.name}</span></div></div>
@@ -190,7 +227,34 @@ function pPlayer(){
             <button class="btn ghost" onclick="playerNav(1)" ${P.idx===total-1?'disabled':''}>Next →</button></div></div>
       </div>
       <div class="nav-rail" id="navRail">${navInner()}</div>
+    </div>
+    <div class="player-exit-bottom">
+      <button class="btn ghost sm" onclick="exitPlayer()">✕ Save &amp; exit</button>
+      <button class="btn ghost sm" onclick="playerSignOut()">Sign out</button>
     </div></div>`;
+}
+
+/* #8 branding bar: ministry/department logo + label, resolved from the
+   effective org/cohort branding returned by start_player_assessment. The
+   logo lives in the public 'org-branding' bucket, so we build its URL from
+   the configured Supabase project URL. */
+function playerBrandUrl(path){
+  if (!path) return null;
+  const base = (window.CONFIG && window.CONFIG.SUPABASE_URL) || '';
+  return base.replace(/\/+$/, '') + '/storage/v1/object/public/org-branding/' + path;
+}
+function playerBrandBar(){
+  const b = state.player && state.player.branding;
+  if (!b) return '';
+  const esc = (typeof _escP === 'function') ? _escP : (s => String(s == null ? '' : s));
+  const label = b.label ? esc(b.label) : '';
+  const sub   = b.sublabel ? esc(b.sublabel) : '';
+  const logo  = playerBrandUrl(b.logo_path);
+  if (!label && !sub && !logo) return '';
+  return `<div class="player-brand">`
+    + (logo ? `<img src="${logo}" alt="" onerror="this.style.display='none'">` : '')
+    + `<div>${label ? `<div class="pb-label">${label}</div>` : ''}${sub ? `<div class="pb-sub">${sub}</div>` : ''}</div>`
+    + `</div>`;
 }
 
 function playerControls(q){
@@ -298,7 +362,27 @@ function updateSaveIndicator(){
 }
 
 /* ---------------- Navigation ---------------- */
+// #5 soft-warn: a "select all that apply" (multi) question with fewer than two
+// options chosen almost certainly isn't finished. We can't say WHICH options are
+// correct (the answer key never reaches the browser), so we only nudge on the
+// forward "Next →" step — the participant can still continue.
+function _multiSelCount(q){ const a = state.player.answers[q.id]; return (a && a.selected) ? a.selected.length : 0; }
 function playerNav(d){
+  const P = state.player;
+  const q = P.questions[P.idx];
+  if (d > 0 && q && q.type === 'multi' && _multiSelCount(q) < 2){
+    const n = _multiSelCount(q);
+    showModal({
+      title: 'Select all that apply',
+      body: `This is a <b>select-all-that-apply</b> question and you've chosen <b>${n}</b> option${n===1?'':'s'} so far. Please make sure you've selected every option you think applies before moving on.`,
+      confirm: 'Continue anyway',
+      onConfirm: () => { closeModal(); _playerMove(d); }
+    });
+    return;
+  }
+  _playerMove(d);
+}
+function _playerMove(d){
   const P = state.player; P.idx = Math.max(0, Math.min(P.questions.length-1, P.idx+d));
   renderParticipant(); tickTimer();
   const m = document.querySelector('.main'); if (m) m.scrollTo(0,0);
@@ -351,6 +435,17 @@ function exitPlayer(){
   toast('Progress saved', 'ok'); leavePlayer();
 }
 function leavePlayer(){ state.player = null; state.tasks = undefined; pgo('tasks'); }
+
+/* #11 sign out from within an attempt (mobile bottom bar). Tear down proctoring
+   and the timer FIRST so their listeners don't leak onto the login screen;
+   autosaved answers persist, so the attempt can be resumed after signing back in. */
+function playerSignOut(){
+  const P = state.player; if (P) P.terminated = true;
+  detachProctoring(); stopTimer();
+  try { flushSaves(); } catch(e){}
+  if (typeof doLogout === 'function') doLogout();
+  else { state.player = null; pgo('tasks'); }
+}
 
 /* ---------------- Countdown timer (large; updated text-only, never re-rendered on answer) ---------------- */
 let _timerInt;
@@ -433,6 +528,8 @@ function proctorWarn(count, reason){
 }
 function attachProctoring(){
   const P = state.player; if (!P) return;
+  const cfg = P.proctoring || {};
+  const on = k => cfg[k] !== false;   // undefined => on (legacy all-proctored)
   _proctor.vis = () => { if (document.hidden && !P.terminated){ registerViolation('tab_switch'); } };
   _proctor.blur = () => { setTimeout(() => { if (!P.terminated && !document.hasFocus() && !document.hidden){ registerViolation('window_blur'); } }, 200); };
   _proctor.block = e => { e.preventDefault(); proctorLog(e.type); toast('That action is disabled during the assessment','err'); };
@@ -446,17 +543,30 @@ function attachProctoring(){
   };
   _proctor.beforeunload = e => { if (!P.terminated){ e.preventDefault(); e.returnValue = ''; proctorLog('nav_attempt'); } };
   _proctor.fs = () => { const inFs = !!document.fullscreenElement; if (inFs) P.fsActive = true; else if (P.fsActive && !P.terminated){ registerViolation('fullscreen_exit'); } };
-  document.addEventListener('visibilitychange', _proctor.vis);
-  window.addEventListener('blur', _proctor.blur);
-  document.addEventListener('contextmenu', _proctor.block);
-  document.addEventListener('copy', _proctor.block);
-  document.addEventListener('cut', _proctor.block);
-  document.addEventListener('paste', _proctor.block);
-  document.addEventListener('keydown', _proctor.keys, true);
-  window.addEventListener('beforeunload', _proctor.beforeunload);
-  document.addEventListener('fullscreenchange', _proctor.fs);
-  const el = document.documentElement;
-  if (el.requestFullscreen){ el.requestFullscreen().then(()=>{ P.fsActive = true; }).catch(()=>{}); }
+
+  // tab-switch / window-blur → strike-based auto-submit
+  if (on('tab_switch')){
+    document.addEventListener('visibilitychange', _proctor.vis);
+    window.addEventListener('blur', _proctor.blur);
+  }
+  // clipboard blocking
+  if (on('copy_paste')){
+    document.addEventListener('copy', _proctor.block);
+    document.addEventListener('cut', _proctor.block);
+    document.addEventListener('paste', _proctor.block);
+  }
+  // right-click / context menu
+  if (on('right_click')) document.addEventListener('contextmenu', _proctor.block);
+  // devtools / risky keyboard shortcuts
+  if (on('devtools')) document.addEventListener('keydown', _proctor.keys, true);
+  // navigation guard (beforeunload prompt)
+  if (on('nav_guard')) window.addEventListener('beforeunload', _proctor.beforeunload);
+  // force full screen + treat exiting it as a strike
+  if (on('fullscreen')){
+    document.addEventListener('fullscreenchange', _proctor.fs);
+    const el = document.documentElement;
+    if (el.requestFullscreen){ el.requestFullscreen().then(()=>{ P.fsActive = true; }).catch(()=>{}); }
+  }
 }
 function detachProctoring(){
   if (!_proctor.vis) return;
