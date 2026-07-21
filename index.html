@@ -25,6 +25,9 @@
   <div class="avatar" id="userAv">AD</div>
 </header>
 
+<!-- org / cohort branding banner (Ministry · Department · Organisation) -->
+<div class="org-banner" id="orgBanner" style="display:none"></div>
+
 <!-- global cohort selector (admin only) -->
 <div class="context-bar" id="contextBar">
   <span class="muted small" style="font-weight:600">Cohort</span>
@@ -50,6 +53,8 @@
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pdfmake@0.2.12/build/pdfmake.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pdfmake@0.2.12/build/vfs_fonts.js"></script>
 
   <!-- Public config (Supabase URL + anon key — safe to ship; RLS is the real gate) -->
   <script src="config.js"></script>

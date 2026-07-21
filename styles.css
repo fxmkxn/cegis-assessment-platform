@@ -37,8 +37,9 @@ h1,h2,h3{margin:0;color:var(--g900);font-weight:650}
 /* ---------- CEGIS header (from index.html) ---------- */
 .site-header{background:#fff;border-bottom:2px solid #dfe0df;
   padding:11px clamp(12px,4vw,30px);display:flex;align-items:center;gap:14px;
-  flex-shrink:0;z-index:40}
+  flex-shrink:0;z-index:40;flex-wrap:wrap}
 .site-header img{height:38px}
+.site-title{min-width:0}
 .site-title h1{font-size:1rem;font-weight:700;color:var(--indigo);letter-spacing:-.01em}
 .site-title p{font-size:.72rem;color:var(--g500);margin-top:1px}
 .spacer{flex:1}
@@ -50,6 +51,18 @@ h1,h2,h3{margin:0;color:var(--g900);font-weight:650}
 .avatar{width:32px;height:32px;border-radius:50%;background:var(--indigo);color:#fff;display:grid;place-items:center;font-size:12px;font-weight:700}
 /* header user-avatar circle removed (handled here so index.html needs no edit) */
 #userAv{display:none!important}
+
+/* signed-in account chrome: keep a long email from stretching the header */
+#authChrome{min-width:0;flex-wrap:wrap;justify-content:flex-end}
+.authName{max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;vertical-align:bottom}
+
+/* org / cohort branding banner (Ministry · Department · Organisation) below the header */
+.org-banner{background:#fff;border-bottom:1px solid var(--g200);
+  padding:8px clamp(12px,4vw,30px);display:flex;align-items:center;gap:12px;flex-shrink:0;min-width:0}
+.org-banner img{height:34px;width:auto;flex:none}
+.org-banner .ob-text{min-width:0}
+.org-banner .ob-1{font-weight:700;color:var(--g800);line-height:1.2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.org-banner .ob-2,.org-banner .ob-3{font-size:12px;color:var(--g500);line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* slim context bar holds the global cohort selector (admin only) */
 .context-bar{background:#fff;border-bottom:1px solid var(--g200);
@@ -200,6 +213,8 @@ tr:hover td{background:var(--g50)}
 
 /* report */
 .report-wrap{max-width:880px;margin:0 auto}
+.report-grid{display:grid;grid-template-columns:180px 1fr;gap:16px;align-items:start}
+.rep-2col{display:grid;grid-template-columns:1fr 1fr;gap:16px}
 .summary-band{background:linear-gradient(135deg,#013d57,#016796);color:#fff;border-radius:14px;padding:24px}
 .metric-tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px;margin-top:18px}
 .mt{background:rgba(255,255,255,.12);border-radius:10px;padding:13px 15px}
@@ -252,4 +267,22 @@ hr{border:none;border-top:1px solid var(--g200);margin:22px 0}
 .oct-bubble{position:absolute;border:1.5px solid rgba(1,103,150,.3);border-radius:50%;animation:rise2 linear infinite}
 @keyframes rise2{0%{transform:translateY(0);opacity:.5}100%{transform:translateY(-260px);opacity:0}}
 
-@media(max-width:780px){.rail{display:none}.main{padding:16px}}
+@media(max-width:780px){
+  .rail{display:none}
+  .main{padding:16px}
+  .report-grid{grid-template-columns:1fr}
+  .rep-2col{grid-template-columns:1fr}
+  .section-nav{position:static;top:auto;display:flex;flex-wrap:nowrap;overflow-x:auto;gap:6px;margin-bottom:12px;-webkit-overflow-scrolling:touch}
+  .section-nav a{border-left:none;border-bottom:2px solid var(--g200);white-space:nowrap;padding:6px 10px}
+  .section-nav a.on{border-left:none;border-bottom-color:var(--indigo)}
+}
+@media(max-width:640px){
+  .site-header{gap:10px;padding:10px 14px}
+  .site-header img{height:30px}
+  .site-title p{display:none}
+  .site-title h1{font-size:.95rem}
+  #authChrome{width:100%;order:5;justify-content:flex-start;margin-top:2px}
+  .authName{max-width:150px}
+  .context-bar{padding:8px 14px}
+  .org-banner{padding:7px 14px}
+}
