@@ -90,15 +90,30 @@ function radarChart(radar){
   if(radar.axes===undefined && REPORTS_PROTO.radarChart) return REPORTS_PROTO.radarChart(); // demo signature
   const axes=radar.axes||[], self=radar.self||[], other=radar.others;
   if(!axes.length) return `<div class="muted small" style="padding:20px;text-align:center">No 360 data available yet.</div>`;
-  const cx=170,cy=160,R=120,N=axes.length,max=5;
+  const cx=190,cy=170,R=115,N=axes.length,max=5;
   const pt=(i,v)=>{const a=-Math.PI/2+i*2*Math.PI/N,r=v/max*R;return [cx+r*Math.cos(a),cy+r*Math.sin(a)];};
   const ring=l=>{let p='';for(let i=0;i<N;i++){const[x,y]=pt(i,l);p+=(i?'L':'M')+x+' '+y;}return p+'Z';};
   const poly=(a,c,f)=>{let p='';a.forEach((v,i)=>{const[x,y]=pt(i,v);p+=(i?'L':'M')+x+' '+y;});return `<path d="${p}Z" fill="${f}" stroke="${c}" stroke-width="2"/>`;};
   const spokes=axes.map((_,i)=>{const[x,y]=pt(i,max);return `<line x1="${cx}" y1="${cy}" x2="${x}" y2="${y}" stroke="#e2e8f0"/>`;}).join('');
-  const labs=axes.map((a,i)=>{const[x,y]=pt(i,max+0.6);return `<text x="${x}" y="${y}" font-size="10.5" fill="#475569" text-anchor="middle">${rEsc(a)}</text>`;}).join('');
+  const labs=axes.map((a,i)=>{const[x,y]=pt(i,max*1.14);return _radarLabel(x,y,cx,a);}).join('');
   const rings=[1,2,3,4,5].map(l=>`<path d="${ring(l)}" fill="none" stroke="#e6f1f7"/>`).join('');
   const otherPoly=(other&&other.length===N)?poly(other,'#3c9052','rgba(60,144,82,.15)'):'';
-  return `<svg viewBox="0 0 340 320" width="340" height="300">${rings}${spokes}${otherPoly}${poly(self,'#016796','rgba(1,103,150,.18)')}${labs}</svg>`;
+  return `<svg viewBox="0 0 380 350" width="380" height="350" xmlns="http://www.w3.org/2000/svg">${rings}${spokes}${otherPoly}${poly(self,'#016796','rgba(1,103,150,.18)')}${labs}</svg>`;
+}
+
+/* shared radar axis label: anchor by which side of centre it sits, and wrap
+   long competency names onto two lines so they don't clip the viewBox. */
+function _radarLabel(x,y,cx,text){
+  const anchor = Math.abs(x-cx)<10 ? 'middle' : (x<cx?'end':'start');
+  const t=String(text);
+  if(t.length<=13) return `<text x="${x}" y="${y}" font-size="9.5" fill="#475569" text-anchor="${anchor}">${rEsc(t)}</text>`;
+  const w=t.split(/\s+/);
+  const half = w.length<2 ? 1 : Math.ceil(w.length/2);
+  const l1=w.slice(0,half).join(' '), l2=w.slice(half).join(' ');
+  return `<text x="${x}" font-size="9.5" fill="#475569" text-anchor="${anchor}">`
+    + `<tspan x="${x}" y="${y-4}">${rEsc(l1)}</tspan>`
+    + (l2?`<tspan x="${x}" y="${y+7}">${rEsc(l2)}</tspan>`:'')
+    + `</text>`;
 }
 
 /* ---- technical competency radar: one axis per competency, Baseline vs Latest (0-100) ---- */
@@ -116,16 +131,16 @@ function techRadarData(chart){
   return { axes, latest, baseline };
 }
 function techRadarSVG(d){
-  const axes=d.axes, N=axes.length, cx=190,cy=175,R=125,max=100;
+  const axes=d.axes, N=axes.length, cx=220,cy=180,R=112,max=100;
   const pt=(i,v)=>{const a=-Math.PI/2+i*2*Math.PI/N,r=(v==null?0:v)/max*R;return [cx+r*Math.cos(a),cy+r*Math.sin(a)];};
   const ringPath=l=>{let p='';for(let i=0;i<N;i++){const[x,y]=pt(i,l);p+=(i?'L':'M')+x+' '+y;}return p+'Z';};
   const poly=(arr,stroke,fill)=>{let p='';arr.forEach((v,i)=>{const[x,y]=pt(i,v);p+=(i?'L':'M')+x+' '+y;});return `<path d="${p}Z" fill="${fill}" stroke="${stroke}" stroke-width="2"/>`;};
   const rings=[25,50,75,100].map(l=>`<path d="${ringPath(l)}" fill="none" stroke="#e6f1f7"/>`).join('');
   const spokes=axes.map((_,i)=>{const[x,y]=pt(i,max);return `<line x1="${cx}" y1="${cy}" x2="${x}" y2="${y}" stroke="#e2e8f0"/>`;}).join('');
-  const labs=axes.map((a,i)=>{const[x,y]=pt(i,max*1.12);const anchor=Math.abs(x-cx)<8?'middle':(x<cx?'end':'start');return `<text x="${x}" y="${y}" font-size="10.5" fill="#475569" text-anchor="${anchor}">${rEsc(a)}</text>`;}).join('');
+  const labs=axes.map((a,i)=>{const[x,y]=pt(i,max*1.16);return _radarLabel(x,y,cx,a);}).join('');
   const base=d.baseline?poly(d.baseline,'#3c9052','rgba(60,144,82,.14)'):'';
   const latest=poly(d.latest,'#016796','rgba(1,103,150,.18)');
-  return `<svg viewBox="0 0 380 350" width="380" height="330" xmlns="http://www.w3.org/2000/svg">${rings}${spokes}${base}${latest}${labs}</svg>`;
+  return `<svg viewBox="0 0 440 360" width="440" height="360" xmlns="http://www.w3.org/2000/svg">${rings}${spokes}${base}${latest}${labs}</svg>`;
 }
 function techRadarChart(chart){
   const d=techRadarData(chart);
@@ -154,6 +169,7 @@ function reportMetricTiles(m){
 function renderReportFrom(content, opts){
   opts=opts||{};
   const n=content.narrative||{}, s=content.subject||{}, c=content.charts||{};
+  const hasBehavioral = !!(c.radar && Array.isArray(c.radar.axes) && c.radar.axes.length);
   const first=(s.name||'').split(/\s+/)[0]||'This participant';
   const perComp=(n.per_competency||[]).map(pc=>`<div class="ai-block" style="margin-top:10px">
     <span class="ai-label">✦ ${rEsc(pc.competency)}</span>
@@ -178,7 +194,7 @@ function renderReportFrom(content, opts){
   return `<div class="report-wrap"><div class="report-grid">
     <div class="section-nav" id="secNav">
       <a href="#summary" class="on">Summary</a><a href="#technical">Technical progression</a>
-      <a href="#behavioral">Behavioral 360</a><a href="#themes">Strengths &amp; gaps</a><a href="#recs">Recommendations</a></div>
+      ${hasBehavioral?'<a href="#behavioral">Behavioral 360</a>':''}<a href="#themes">Strengths &amp; gaps</a><a href="#recs">Recommendations</a></div>
     <div id="reportRoot">
       <div id="reportBrand">${reportsBrandBarHtml(content.branding||null)}</div>
       <div class="flex jb ac" style="margin-bottom:16px">
@@ -199,13 +215,13 @@ function renderReportFrom(content, opts){
         <div class="ai-block"><span class="ai-label">✦ AI interpretation</span>
         <p style="margin:8px 0 0">${rEsc(n.technical_interpretation||'')}</p></div></section>
 
-      <section id="behavioral" style="margin-top:26px"><h2 style="margin-bottom:4px">Behavioral 360</h2>
+      ${hasBehavioral?`<section id="behavioral" style="margin-top:26px"><h2 style="margin-bottom:4px">Behavioral 360</h2>
         <p class="muted small" style="margin-bottom:12px">Self-rating vs. aggregated other-raters (anonymized).</p>
         <div class="card pad" style="display:flex;justify-content:center">${radarChart(c.radar)}</div>
         ${c.radar?`<div class="legend" style="justify-content:center"><span><i style="background:var(--indigo)"></i>Self</span>${(c.radar.others)?'<span><i style="background:var(--teal)"></i>Others (aggregated)</span>':''}</div>`:''}
         ${suppNote}
         <div class="ai-block"><span class="ai-label">✦ AI synthesis</span>
-        <p style="margin:8px 0 0">${rEsc(n.behavioral_synthesis||'')}</p></div></section>
+        <p style="margin:8px 0 0">${rEsc(n.behavioral_synthesis||'')}</p></div></section>`:''}
 
       <section id="themes" style="margin-top:26px"><h2 style="margin-bottom:12px">Per-competency &amp; development</h2>
         ${perComp}
@@ -436,12 +452,13 @@ async function exportReport(){
     if(techSvg) stack.push({ svg:_pdfCleanSvg(techSvg), width:360, alignment:'center', margin:[0,4,0,4] });
     if(n.technical_interpretation) stack.push(_pdfAI(n.technical_interpretation));
 
-    // behavioral 360
-    stack.push(_pdfH2('Behavioral 360',[0,16,0,0]));
-    const radSvg=c.radar?firstSvg(radarChart(c.radar)):null;
-    if(radSvg) stack.push({ svg:_pdfCleanSvg(radSvg), width:300, alignment:'center', margin:[0,4,0,4] });
-    else stack.push({ text:'No 360 data available yet.', italics:true, color:'#64748b', fontSize:9, margin:[0,4,0,4] });
-    if(n.behavioral_synthesis) stack.push(_pdfAI(n.behavioral_synthesis));
+    // behavioral 360 — omitted entirely when there is no 360 data
+    const radSvg=(c.radar && (c.radar.axes||[]).length)?firstSvg(radarChart(c.radar)):null;
+    if(radSvg){
+      stack.push(_pdfH2('Behavioral 360',[0,16,0,0]));
+      stack.push({ svg:_pdfCleanSvg(radSvg), width:300, alignment:'center', margin:[0,4,0,4] });
+      if(n.behavioral_synthesis) stack.push(_pdfAI(n.behavioral_synthesis));
+    }
 
     // per-competency + strengths/development
     stack.push(_pdfH2('Per-competency & development',[0,16,0,0]));
