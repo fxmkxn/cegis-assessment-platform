@@ -213,6 +213,7 @@ tr:hover td{background:var(--g50)}
 
 /* report */
 .report-wrap{max-width:880px;margin:0 auto}
+.report-wrap svg{max-width:100%;height:auto}
 .report-grid{display:grid;grid-template-columns:180px 1fr;gap:16px;align-items:start}
 .rep-2col{display:grid;grid-template-columns:1fr 1fr;gap:16px}
 .summary-band{background:linear-gradient(135deg,#013d57,#016796);color:#fff;border-radius:14px;padding:24px}
