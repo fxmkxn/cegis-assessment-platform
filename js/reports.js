@@ -206,8 +206,7 @@ function renderReportFrom(content, opts){
         <div class="ai-label" style="background:rgba(255,255,255,.18);color:#fff">✦ AI-generated</div>
         <h1 style="color:#fff;margin:10px 0 4px">${rEsc(s.name||'')} — ${content.type==='stage'?'Stage report':'Lifecycle report'}</h1>
         <div style="opacity:.85;font-size:13px">${rEsc(s.meta||'')}${s.cohort_name?' · '+rEsc(s.cohort_name):''}</div></div>
-        <p style="margin:14px 0 0;opacity:.95;max-width:600px">${rEsc(n.summary||'')}</p>
-        ${reportMetricTiles(content.metrics||{})}</div></section>
+        <p style="margin:14px 0 0;opacity:.95;max-width:600px">${rEsc(n.summary||'')}</p></div></section>
 
       <section id="technical" style="margin-top:26px"><h2 style="margin-bottom:4px">Technical progression</h2>
         <p class="muted small" style="margin-bottom:12px">Per-competency scores — baseline vs latest checkpoint (a trend line is shown when fewer than three competencies are tagged).</p>
@@ -430,21 +429,15 @@ async function exportReport(){
       stack.push({ canvas:[{ type:'line', x1:0, y1:0, x2:515, y2:0, lineWidth:0.7, lineColor:'#e2e8f0' }], margin:[0,0,0,12] });
     }
 
-    // title band
-    stack.push({ text:'✦ AI-GENERATED', fontSize:8, bold:true, color:'#016796', margin:[0,0,0,3] });
+    // title band — the star is drawn as vector (pdfmake's font has no ✦ glyph)
+    stack.push({ columns:[
+      { width:11, svg:'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12" width="9" height="9"><path d="M6 0 L7.2 4.8 L12 6 L7.2 7.2 L6 12 L4.8 7.2 L0 6 L4.8 4.8 Z" fill="#016796"/></svg>', margin:[0,1,0,0] },
+      { width:'*', text:'AI-GENERATED', fontSize:8, bold:true, color:'#016796' }
+    ], columnGap:3, margin:[0,0,0,3] });
     stack.push({ text:`${s.name||''} — ${content.type==='stage'?'Stage report':'Lifecycle report'}`, fontSize:18, bold:true, color:'#013d57' });
     const metaLine=[s.meta,s.cohort_name].filter(Boolean).join(' · ');
     if(metaLine) stack.push({ text:metaLine, fontSize:10, color:'#64748b', margin:[0,2,0,8] });
-    if(n.summary) stack.push({ text:n.summary, fontSize:10.5, lineHeight:1.3, margin:[0,0,0,10] });
-
-    // metric tiles
-    const tiles=[
-      [m.technical_gain_pct==null?'—':((m.technical_gain_pct>=0?'+':'')+m.technical_gain_pct+'%'),'Technical gain (first→last)'],
-      [m.behavioral_score==null?'—':String(m.behavioral_score),'Behavioral score (of 5)'],
-      [m.stages_completed_pct==null?'—':(m.stages_completed_pct+'%'),'Stages completed'],
-      [String(m.raters||0),'Raters · 360'],
-    ];
-    stack.push({ columns:tiles.map(t=>({ width:'*', stack:[{ text:t[0], fontSize:16, bold:true, color:'#013d57' },{ text:t[1], fontSize:8, color:'#64748b' }] })), columnGap:10, margin:[0,0,0,14] });
+    if(n.summary) stack.push({ text:n.summary, fontSize:10.5, lineHeight:1.3, margin:[0,0,0,14] });
 
     // technical
     stack.push(_pdfH2('Technical progression'));
