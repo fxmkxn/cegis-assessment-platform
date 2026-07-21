@@ -101,6 +101,42 @@ function radarChart(radar){
   return `<svg viewBox="0 0 340 320" width="340" height="300">${rings}${spokes}${otherPoly}${poly(self,'#016796','rgba(1,103,150,.18)')}${labs}</svg>`;
 }
 
+/* ---- technical competency radar: one axis per competency, Baseline vs Latest (0-100) ---- */
+function _trFirst(a){ for(const v of a){ if(v!=null) return Number(v); } return null; }
+function _trLast(a){ for(let i=a.length-1;i>=0;i--){ if(a[i]!=null) return Number(a[i]); } return null; }
+function techRadarData(chart){
+  if(!chart || !Array.isArray(chart.series)) return null;
+  const comp=chart.series.filter(s=>s && s.name!=='Overall' && Array.isArray(s.points));
+  if(comp.length<3) return null;                        // a radar needs >=3 axes to read well
+  const axes=comp.map(s=>s.name);
+  const latest=comp.map(s=>_trLast(s.points));
+  const multi=(chart.labels||[]).length>=2;
+  let baseline=multi?comp.map(s=>_trFirst(s.points)):null;
+  if(baseline && baseline.every((v,i)=>v===latest[i])) baseline=null;   // single distinct checkpoint
+  return { axes, latest, baseline };
+}
+function techRadarSVG(d){
+  const axes=d.axes, N=axes.length, cx=190,cy=175,R=125,max=100;
+  const pt=(i,v)=>{const a=-Math.PI/2+i*2*Math.PI/N,r=(v==null?0:v)/max*R;return [cx+r*Math.cos(a),cy+r*Math.sin(a)];};
+  const ringPath=l=>{let p='';for(let i=0;i<N;i++){const[x,y]=pt(i,l);p+=(i?'L':'M')+x+' '+y;}return p+'Z';};
+  const poly=(arr,stroke,fill)=>{let p='';arr.forEach((v,i)=>{const[x,y]=pt(i,v);p+=(i?'L':'M')+x+' '+y;});return `<path d="${p}Z" fill="${fill}" stroke="${stroke}" stroke-width="2"/>`;};
+  const rings=[25,50,75,100].map(l=>`<path d="${ringPath(l)}" fill="none" stroke="#e6f1f7"/>`).join('');
+  const spokes=axes.map((_,i)=>{const[x,y]=pt(i,max);return `<line x1="${cx}" y1="${cy}" x2="${x}" y2="${y}" stroke="#e2e8f0"/>`;}).join('');
+  const labs=axes.map((a,i)=>{const[x,y]=pt(i,max*1.12);const anchor=Math.abs(x-cx)<8?'middle':(x<cx?'end':'start');return `<text x="${x}" y="${y}" font-size="10.5" fill="#475569" text-anchor="${anchor}">${rEsc(a)}</text>`;}).join('');
+  const base=d.baseline?poly(d.baseline,'#3c9052','rgba(60,144,82,.14)'):'';
+  const latest=poly(d.latest,'#016796','rgba(1,103,150,.18)');
+  return `<svg viewBox="0 0 380 350" width="380" height="330" xmlns="http://www.w3.org/2000/svg">${rings}${spokes}${base}${latest}${labs}</svg>`;
+}
+function techRadarChart(chart){
+  const d=techRadarData(chart);
+  if(!d) return lineChart(chart);                        // <3 competencies → keep the trend line
+  const legend=d.baseline
+    ? `<div class="legend" style="justify-content:center"><span><i style="background:#3c9052"></i>Baseline</span><span><i style="background:#016796"></i>Latest</span></div>`
+    : `<div class="legend" style="justify-content:center"><span><i style="background:#016796"></i>Score</span></div>`;
+  return `<div style="display:flex;justify-content:center">${techRadarSVG(d)}</div>${legend}`;
+}
+function firstSvg(html){ if(!html) return null; const a=html.indexOf('<svg'); const b=html.indexOf('</svg>'); return (a>=0&&b>=0)?html.slice(a,b+6):null; }
+
 /* ============================================================
    RENDER A PERSISTED REPORT  (shared by participant + admin views)
    ============================================================ */
@@ -133,17 +169,18 @@ function renderReportFrom(content, opts){
   const backBtn = opts.admin
     ? `<button class="btn ghost sm" onclick="REPORTS.adminView=null;renderAdmin()">← All reports</button>` : '';
   const genAt = content.generated_at ? new Date(content.generated_at).toLocaleString() : '';
-  // #8 branding: baked into content for reports generated after this change;
-  // for older reports (no content.branding) we patch it in live after paint.
-  const brand = content.branding || null;
-  if (!brand) setTimeout(() => reportsBrandFallback(opts), 0);
+  // #8 branding: always resolve the CURRENT org/cohort branding (Ministry/
+  // Department/Organisation) and patch it in after paint, so the report header
+  // and the banner stay consistent. Cache context for the PDF export.
+  REPORTS.exportCtx = { content, opts };
+  setTimeout(() => reportsBrandPatch(content, opts), 0);
 
-  return `<div class="report-wrap"><div class="grid" style="grid-template-columns:180px 1fr;align-items:start">
+  return `<div class="report-wrap"><div class="report-grid">
     <div class="section-nav" id="secNav">
       <a href="#summary" class="on">Summary</a><a href="#technical">Technical progression</a>
       <a href="#behavioral">Behavioral 360</a><a href="#themes">Strengths &amp; gaps</a><a href="#recs">Recommendations</a></div>
     <div id="reportRoot">
-      <div id="reportBrand">${reportsBrandBarHtml(brand)}</div>
+      <div id="reportBrand">${reportsBrandBarHtml(content.branding||null)}</div>
       <div class="flex jb ac" style="margin-bottom:16px">
         <div class="crumb">${opts.admin?'Reports / '+rEsc(s.name||''):'My Reports / Comprehensive'}</div>
         <div class="flex g8 ac">${backBtn}${regenBtn}
@@ -157,8 +194,8 @@ function renderReportFrom(content, opts){
         ${reportMetricTiles(content.metrics||{})}</div></section>
 
       <section id="technical" style="margin-top:26px"><h2 style="margin-bottom:4px">Technical progression</h2>
-        <p class="muted small" style="margin-bottom:12px">Overall and per-competency scores across completed checkpoints.</p>
-        <div class="card pad">${lineChart(c.technical)}</div>
+        <p class="muted small" style="margin-bottom:12px">Per-competency scores — baseline vs latest checkpoint (a trend line is shown when fewer than three competencies are tagged).</p>
+        <div class="card pad">${techRadarChart(c.technical)}</div>
         <div class="ai-block"><span class="ai-label">✦ AI interpretation</span>
         <p style="margin:8px 0 0">${rEsc(n.technical_interpretation||'')}</p></div></section>
 
@@ -172,7 +209,7 @@ function renderReportFrom(content, opts){
 
       <section id="themes" style="margin-top:26px"><h2 style="margin-bottom:12px">Per-competency &amp; development</h2>
         ${perComp}
-        <div class="grid" style="grid-template-columns:1fr 1fr;margin-top:14px">
+        <div class="rep-2col" style="margin-top:14px">
           <div class="card pad"><div class="badge ok" style="margin-bottom:8px">Strengths</div>
             <ul style="margin:0;padding-left:18px">${strengths||'<li class="muted">—</li>'}</ul></div>
           <div class="card pad"><div class="badge warn" style="margin-bottom:8px">Development areas</div>
@@ -199,20 +236,23 @@ function reportsBrandUrl(path){
 }
 function reportsBrandBarHtml(b){
   if (!b) return '';
-  const label = b.label ? rEsc(b.label) : '';
-  const sub   = b.sublabel ? rEsc(b.sublabel) : '';
+  const lines = [b.ministry, b.department, b.organisation, b.label, b.sublabel]
+    .map(x => (x == null ? '' : String(x).trim())).filter(Boolean);
   const logo  = reportsBrandUrl(b.logo_path);
-  if (!label && !sub && !logo) return '';
+  if (!lines.length && !logo) return '';
+  const txt = lines.map((l, i) => i === 0
+    ? `<div style="font-weight:700;color:var(--g800);line-height:1.2">${rEsc(l)}</div>`
+    : `<div style="font-size:12px;color:var(--g500);line-height:1.25">${rEsc(l)}</div>`).join('');
   return `<div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid var(--g200)">`
     + (logo ? `<img src="${logo}" alt="" style="height:40px;width:auto;display:block" onerror="this.style.display='none'">` : '')
-    + `<div>${label ? `<div style="font-weight:700;color:var(--g800);line-height:1.2">${label}</div>` : ''}`
-    + `${sub ? `<div style="font-size:12px;color:var(--g500);margin-top:1px">${sub}</div>` : ''}</div></div>`;
+    + `<div style="min-width:0">${txt}</div></div>`;
 }
-async function reportsBrandFallback(opts){
-  const host = document.getElementById('reportBrand');
-  if (!host || !reportsLive()) return;
+async function reportsResolveBrand(content, opts){
+  // Baked branding travels with the report; the CURRENT org/cohort brand
+  // (Ministry/Department/Organisation) wins so the header + PDF reflect the
+  // latest values set in the assessment wizard.
+  if (!reportsLive()) return (content && content.branding) || null;
   try {
-    // resolve the report's cohort so a per-cohort override can apply
     let cohortId = null;
     if ((!opts || !opts.admin) && REPORTS.selfSubject && REPORTS.selfSubject.cohort_id){
       cohortId = REPORTS.selfSubject.cohort_id;
@@ -227,8 +267,14 @@ async function reportsBrandFallback(opts){
       const { data: coh } = await sb.from('cohorts').select('brand').eq('id', cohortId).maybeSingle();
       if (coh && coh.brand) brand = Object.assign({}, brand, coh.brand);
     }
-    host.innerHTML = reportsBrandBarHtml(brand);
-  } catch (e){ /* leave the header unbranded on failure */ }
+    return Object.assign({}, (content && content.branding) || {}, brand);
+  } catch (e){ return (content && content.branding) || null; }
+}
+async function reportsBrandPatch(content, opts){
+  const eff = await reportsResolveBrand(content, opts);
+  REPORTS.effectiveBrand = eff;
+  const host = document.getElementById('reportBrand');
+  if (host) host.innerHTML = reportsBrandBarHtml(eff);
 }
 
 /* ============================================================
@@ -320,28 +366,104 @@ function reportsRegenerate(pid, isAdmin){
 
 /* ============================================================
    PDF EXPORT  (client-side, OFF the generation path)
-   Rasterizes the already-rendered #reportRoot — no LLM, no octopus
-   (octopus would unmount the node html2canvas needs).
+   Builds a VECTOR document with pdfmake from the persisted report
+   object — sharp text, real page breaks, no DOM rasterization.
+   Charts (SVG) are embedded directly; the branding logo (if any) is
+   fetched and embedded as a dataURL so the PDF is self-contained.
    ============================================================ */
+function _pdfH2(t, margin){ return { text:t, fontSize:13, bold:true, color:'#0f172a', margin: margin || [0,0,0,2] }; }
+function _pdfAI(text, stroke, fill){
+  return { table:{ widths:['*'], body:[[{ text:text, fontSize:10, lineHeight:1.3, color:'#1e293b', margin:[8,6,8,6], fillColor: fill || '#e6f1f7' }]] },
+    layout:{ hLineWidth:()=>0, vLineWidth:(i)=> i===0 ? 3 : 0, vLineColor:()=> stroke || '#016796' }, margin:[0,4,0,0] };
+}
+function _pdfCleanSvg(svg){
+  if (!svg) return svg;
+  svg = svg.replace(/\swidth="100%"/,'');
+  if (!/xmlns=/.test(svg)) svg = svg.replace('<svg','<svg xmlns="http://www.w3.org/2000/svg"');
+  return svg;
+}
+async function _pdfLogoDataUrl(path){
+  try {
+    const url = reportsBrandUrl(path); if (!url) return null;
+    const r = await fetch(url); if (!r.ok) return null;
+    const b = await r.blob();
+    return await new Promise(res => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = () => res(null); fr.readAsDataURL(b); });
+  } catch (e){ return null; }
+}
 async function exportReport(){
   if(!reportsLive()) return REPORTS_PROTO.exportReport ? REPORTS_PROTO.exportReport() : null;
-  const node=document.getElementById('reportRoot');
-  if(!node){ toast('Nothing to export','err'); return; }
-  const jsPDFCtor = window.jspdf && window.jspdf.jsPDF;
-  if(!window.html2canvas || !jsPDFCtor){ toast('PDF libraries not loaded','err'); return; }
+  const ctx = REPORTS.exportCtx;
+  const content = ctx && ctx.content;
+  if(!content){ toast('Nothing to export','err'); return; }
+  if(!window.pdfMake){ toast('PDF library not loaded','err'); return; }
   const btn=document.getElementById('exportPdfBtn'); if(btn){ btn.disabled=true; btn.textContent='Preparing…'; }
   try{
-    const canvas=await window.html2canvas(node,{scale:2,backgroundColor:'#ffffff',useCORS:true,logging:false});
-    const img=canvas.toDataURL('image/png');
-    const pdf=new jsPDFCtor({orientation:'portrait',unit:'mm',format:'a4'});
-    const pageW=pdf.internal.pageSize.getWidth(), pageH=pdf.internal.pageSize.getHeight();
-    const imgW=pageW, imgH=canvas.height*imgW/canvas.width;
-    let left=imgH, pos=0;
-    pdf.addImage(img,'PNG',0,pos,imgW,imgH);
-    left-=pageH;
-    while(left>0){ pos-=pageH; pdf.addPage(); pdf.addImage(img,'PNG',0,pos,imgW,imgH); left-=pageH; }
-    const who=(REPORTS.adminView && REPORTS.adminView.name) || (REPORTS.selfContent&&REPORTS.selfContent.subject&&REPORTS.selfContent.subject.name) || 'report';
-    pdf.save(who.replace(/[^a-z0-9]+/gi,'_')+'_report.pdf');
+    const n=content.narrative||{}, s=content.subject||{}, c=content.charts||{}, m=content.metrics||{};
+    const brand = REPORTS.effectiveBrand || content.branding || null;
+    const stack=[];
+
+    // branding header (Ministry / Department / Organisation + optional logo)
+    const brandLines=[brand&&brand.ministry,brand&&brand.department,brand&&brand.organisation,brand&&brand.label,brand&&brand.sublabel]
+      .map(x=>(x==null?'':String(x).trim())).filter(Boolean);
+    const logoData = (brand&&brand.logo_path) ? await _pdfLogoDataUrl(brand.logo_path) : null;
+    if(logoData || brandLines.length){
+      const textStack=brandLines.map((l,i)=>({ text:l, bold:i===0, fontSize:i===0?12:9, color:i===0?'#1e293b':'#64748b' }));
+      stack.push(logoData
+        ? { columns:[{ image:logoData, width:38, margin:[0,0,10,0] }, { stack:textStack, width:'*' }], margin:[0,0,0,6] }
+        : { stack:textStack, margin:[0,0,0,6] });
+      stack.push({ canvas:[{ type:'line', x1:0, y1:0, x2:515, y2:0, lineWidth:0.7, lineColor:'#e2e8f0' }], margin:[0,0,0,12] });
+    }
+
+    // title band
+    stack.push({ text:'✦ AI-GENERATED', fontSize:8, bold:true, color:'#016796', margin:[0,0,0,3] });
+    stack.push({ text:`${s.name||''} — ${content.type==='stage'?'Stage report':'Lifecycle report'}`, fontSize:18, bold:true, color:'#013d57' });
+    const metaLine=[s.meta,s.cohort_name].filter(Boolean).join(' · ');
+    if(metaLine) stack.push({ text:metaLine, fontSize:10, color:'#64748b', margin:[0,2,0,8] });
+    if(n.summary) stack.push({ text:n.summary, fontSize:10.5, lineHeight:1.3, margin:[0,0,0,10] });
+
+    // metric tiles
+    const tiles=[
+      [m.technical_gain_pct==null?'—':((m.technical_gain_pct>=0?'+':'')+m.technical_gain_pct+'%'),'Technical gain (first→last)'],
+      [m.behavioral_score==null?'—':String(m.behavioral_score),'Behavioral score (of 5)'],
+      [m.stages_completed_pct==null?'—':(m.stages_completed_pct+'%'),'Stages completed'],
+      [String(m.raters||0),'Raters · 360'],
+    ];
+    stack.push({ columns:tiles.map(t=>({ width:'*', stack:[{ text:t[0], fontSize:16, bold:true, color:'#013d57' },{ text:t[1], fontSize:8, color:'#64748b' }] })), columnGap:10, margin:[0,0,0,14] });
+
+    // technical
+    stack.push(_pdfH2('Technical progression'));
+    const techSvg=firstSvg(techRadarChart(c.technical));
+    if(techSvg) stack.push({ svg:_pdfCleanSvg(techSvg), width:360, alignment:'center', margin:[0,4,0,4] });
+    if(n.technical_interpretation) stack.push(_pdfAI(n.technical_interpretation));
+
+    // behavioral 360
+    stack.push(_pdfH2('Behavioral 360',[0,16,0,0]));
+    const radSvg=c.radar?firstSvg(radarChart(c.radar)):null;
+    if(radSvg) stack.push({ svg:_pdfCleanSvg(radSvg), width:300, alignment:'center', margin:[0,4,0,4] });
+    else stack.push({ text:'No 360 data available yet.', italics:true, color:'#64748b', fontSize:9, margin:[0,4,0,4] });
+    if(n.behavioral_synthesis) stack.push(_pdfAI(n.behavioral_synthesis));
+
+    // per-competency + strengths/development
+    stack.push(_pdfH2('Per-competency & development',[0,16,0,0]));
+    (n.per_competency||[]).forEach(pc=>{
+      stack.push({ text:pc.competency||'', bold:true, fontSize:10, color:'#01536f', margin:[0,6,0,1] });
+      stack.push({ text:pc.commentary||'', fontSize:10, lineHeight:1.3, margin:[0,0,0,2] });
+    });
+    const strengths=(n.strengths||[]), devs=(n.development_areas||[]);
+    stack.push({ columns:[
+      { width:'*', stack:[{ text:'Strengths', bold:true, fontSize:9, color:'#2a7040', margin:[0,8,0,3] }, strengths.length?{ ul:strengths, fontSize:10 }:{ text:'—', color:'#94a3b8' }] },
+      { width:'*', stack:[{ text:'Development areas', bold:true, fontSize:9, color:'#8a6406', margin:[0,8,0,3] }, devs.length?{ ul:devs, fontSize:10 }:{ text:'—', color:'#94a3b8' }] },
+    ], columnGap:16 });
+
+    // recommendations
+    stack.push(_pdfH2('Recommendations',[0,16,0,0]));
+    if(n.recommendations) stack.push(_pdfAI(n.recommendations,'#3c9052','#eef6f0'));
+    const genAt=content.generated_at?new Date(content.generated_at).toLocaleString():'';
+    stack.push({ text:`All narrative sections are LLM-generated from server-scored results, the question blueprint, and anonymized 360 aggregates${genAt?' · generated '+genAt:''}.`, fontSize:8, color:'#94a3b8', margin:[0,12,0,0] });
+
+    const docDef={ pageSize:'A4', pageMargins:[40,40,40,40], defaultStyle:{ fontSize:10, color:'#1e293b' }, content:stack };
+    const who=(s.name||'report').replace(/[^a-z0-9]+/gi,'_');
+    pdfMake.createPdf(docDef).download(who+'_report.pdf');
     toast('Report exported to PDF','ok');
   }catch(e){ console.warn(e); toast('PDF export failed','err'); }
   finally{ if(btn){ btn.disabled=false; btn.textContent='⤓ Export PDF'; } }

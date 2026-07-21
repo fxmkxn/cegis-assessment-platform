@@ -276,7 +276,7 @@ function playerDone(){return `<div class="player-wrap" style="text-align:center;
 /* === Screen 4 / Flow D: Comprehensive Report === */
 function pReport(){
   const me=ME(), first=me.n.split(/\s+/)[0];
-  return `<div class="report-wrap"><div class="grid" style="grid-template-columns:180px 1fr;align-items:start">
+  return `<div class="report-wrap"><div class="report-grid">
     <div class="section-nav" id="secNav">
       <a href="#summary" class="on">Summary</a><a href="#technical">Technical progression</a>
       <a href="#behavioral">Behavioral 360</a><a href="#themes">Strengths & gaps</a><a href="#recs">Recommendations</a></div>
@@ -308,7 +308,7 @@ function pReport(){
         <p style="margin:8px 0 0">Other raters score ${first} notably higher than the self-rating on <b>Collaboration</b> and <b>Reliability</b>, indicating modest self-assessment and a well-regarded team presence. The clearest self-vs-other gap is on <b>Communication</b>, rated higher in the self-assessment than by raters — a constructive blind spot to explore. Individual rater identities are kept confidential; the themes below are synthesized across all responses.</p></div></section>
 
       <section id="themes" style="margin-top:26px"><h2 style="margin-bottom:12px">Strengths & development areas</h2>
-        <div class="grid" style="grid-template-columns:1fr 1fr">
+        <div class="rep-2col">
           <div class="card pad"><div class="badge ok" style="margin-bottom:8px">Strengths</div>
             <p style="margin:0">Dependable delivery under deadlines; generous in supporting peers; rigorous, well-documented analysis that colleagues trust and reuse.</p></div>
           <div class="card pad"><div class="badge warn" style="margin-bottom:8px">Development areas</div>

@@ -73,7 +73,7 @@ function routeAuth() {
     const who = _authDisplayName();
     ac.innerHTML =
       `<span class="small muted" style="font-weight:600">${AUTH.role === 'admin' ? 'Admin' : 'Participant'}</span>
-       <button class="btn ghost sm" onclick="openAccount()" title="Account settings">${who}</button>
+       <button class="btn ghost sm authName" onclick="openAccount()" title="Account settings">${who}</button>
        <button class="btn ghost sm" onclick="doLogout()">Sign out</button>`;
   }
   render();
@@ -92,6 +92,7 @@ function _authDisplayName() {
 
 function _hideAppChrome() {
   document.getElementById('contextBar').style.display = 'none';
+  const ob = document.getElementById('orgBanner'); if (ob) { ob.style.display = 'none'; ob.innerHTML = ''; }
   const rs = document.getElementById('roleSwitch'); if (rs) rs.style.display = 'none';
   const ac = document.getElementById('authChrome'); if (ac) ac.style.display = 'none';
   const av = document.getElementById('userAv'); if (av) av.style.display = 'none';
@@ -172,3 +173,71 @@ async function doChangePassword() {
   if (error) toast(error.message || 'Could not update password', 'err');
   else toast('Password updated', 'ok');
 }
+
+// =====================================================================
+// Org / cohort branding banner (Ministry · Department · Organisation)
+// Rendered under the header for BOTH roles. Reads the current cohort's
+// brand (admin: the selected cohort; participant: their enrolment),
+// merged over the organisation brand, falling back to organizations.name.
+// Set from the assessment wizard (assessments.js) → cohorts.brand.
+// =====================================================================
+function _brandLines(b){
+  if (!b) return [];
+  return [b.ministry, b.department, b.organisation, b.label, b.sublabel]
+    .map(x => (x == null ? '' : String(x).trim())).filter(Boolean);
+}
+function _bannerLogoUrl(path){
+  if (!path) return null;
+  const base = (window.CONFIG && window.CONFIG.SUPABASE_URL) || '';
+  return base.replace(/\/+$/, '') + '/storage/v1/object/public/org-branding/' + path;
+}
+function _bannerEsc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c])); }
+
+async function _bannerResolveCohortId(){
+  if (AUTH.role === 'admin'){
+    const sel = document.getElementById('cohortSel');
+    if (sel && sel.value) return sel.value;
+    if (window.state && state.cohortId) return state.cohortId;
+    return null;
+  }
+  // participant: resolve their most-recent enrolment's cohort
+  try {
+    let uid = (AUTH.user && AUTH.user.id) || null;
+    if (!uid){ const g = await sb.auth.getUser(); uid = g.data && g.data.user ? g.data.user.id : null; }
+    if (!uid) return null;
+    const { data } = await sb.from('participants').select('cohort_id,created_at')
+      .eq('user_id', uid).is('deleted_at', null)
+      .order('created_at', { ascending: false }).limit(1).maybeSingle();
+    return data ? data.cohort_id : null;
+  } catch(e){ return null; }
+}
+
+async function renderOrgBanner(){
+  const host = document.getElementById('orgBanner');
+  if (!host) return;
+  if (AUTH.demo || !window.SUPABASE_CONFIGURED || !window.sb || !AUTH.orgId){
+    host.style.display = 'none'; host.innerHTML = ''; return;
+  }
+  // one-time: refresh the banner when the admin switches cohort in the context bar
+  if (!AUTH._bannerHook){
+    const sel = document.getElementById('cohortSel');
+    if (sel){ sel.addEventListener('change', () => renderOrgBanner()); AUTH._bannerHook = true; }
+  }
+  try {
+    const { data: org } = await sb.from('organizations').select('name,brand').eq('id', AUTH.orgId).maybeSingle();
+    let brand = (org && org.brand) || {};
+    const cid = await _bannerResolveCohortId();
+    if (cid){
+      const { data: coh } = await sb.from('cohorts').select('brand').eq('id', cid).maybeSingle();
+      if (coh && coh.brand) brand = Object.assign({}, brand, coh.brand);
+    }
+    let lines = _brandLines(brand);
+    if (!lines.length && org && org.name) lines = [org.name];   // fall back to organisation name
+    const logo = _bannerLogoUrl(brand.logo_path);
+    if (!lines.length && !logo){ host.style.display = 'none'; host.innerHTML = ''; return; }
+    const txt = lines.map((l, i) => `<div class="ob-${Math.min(i + 1, 3)}">${_bannerEsc(l)}</div>`).join('');
+    host.innerHTML = (logo ? `<img src="${logo}" alt="" onerror="this.style.display='none'">` : '') + `<div class="ob-text">${txt}</div>`;
+    host.style.display = '';
+  } catch(e){ host.style.display = 'none'; }
+}
+window.renderOrgBanner = renderOrgBanner;

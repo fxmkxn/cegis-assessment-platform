@@ -689,6 +689,7 @@ function asmtDeployView(A){
   if (!A.opensAt){ const d=new Date(); A.opensAt = d.toISOString().slice(0,10); }
   if (!A.closesAt){ const d=new Date(Date.now()+14*864e5); A.closesAt = d.toISOString().slice(0,10); }
   const scored = A.questions.some(q => q.marks != null);
+  setTimeout(asmtHydrateBrand, 0);
   return `<div class="card pad" style="max-width:560px"><h3 style="margin-bottom:14px">Deploy to cohort</h3>
     <div class="kv"><span class="muted">Instrument</span><b>${A.name}</b></div>
     <div class="kv"><span class="muted">Format / stage</span><b>${ASMT_FORMATS[A.kind].label} · ${A.stage}</b></div>
@@ -719,10 +720,40 @@ function asmtDeployView(A){
       ${asmtProctorToggle('devtools','Block developer tools &amp; save/print shortcuts')}
       ${asmtProctorToggle('nav_guard','Warn before leaving or closing the page')}
     </div>
+    <div style="margin-top:16px" id="asmtBrandBox">
+      <div class="muted small" style="font-weight:600;margin-bottom:2px">Banner shown to participants (saved to this cohort)</div>
+      <div class="muted small" style="margin-bottom:8px">Appears under the header and on report headers. Leave blank to inherit the organisation's branding.</div>
+      <input class="cohort-sel" style="width:100%;margin-bottom:8px" id="asmtBrandMinistry" placeholder="Ministry (e.g. Ministry of Panchayati Raj)"
+        value="${_asmtEsc((A.brand&&A.brand.ministry)||'')}" oninput="asmtSetBrand('ministry',this.value)">
+      <input class="cohort-sel" style="width:100%;margin-bottom:8px" id="asmtBrandDept" placeholder="Department (e.g. Department of Rural Development)"
+        value="${_asmtEsc((A.brand&&A.brand.department)||'')}" oninput="asmtSetBrand('department',this.value)">
+      <input class="cohort-sel" style="width:100%" id="asmtBrandOrg" placeholder="Organisation (e.g. State Institute of Rural Development)"
+        value="${_asmtEsc((A.brand&&A.brand.organisation)||'')}" oninput="asmtSetBrand('organisation',this.value)">
+    </div>
     <div class="flex g12" style="margin-top:18px">
       <button class="btn ghost" onclick="asmtPrevStep()">← Back</button>
       <button class="btn" onclick="asmtConfirmDeploy()">Deploy to cohort</button></div>
     <p class="muted small" style="margin-top:12px">⚠ Deployment is participant-visible and cannot be undone once released.</p></div>`;
+}
+
+/* ---------- cohort banner branding (Ministry / Department / Organisation) ---------- */
+function asmtSetBrand(key, val){ const A = state.asmt; A.brand = A.brand || {}; A.brand[key] = val; A.brandTouched = true; }
+async function asmtHydrateBrand(){
+  const A = state.asmt; if (!A) return;
+  if (A.brand !== undefined) return;                    // already loaded or user has typed
+  A.brand = {};                                         // mark loaded to avoid refetch loops
+  const cid = currentCohortId();
+  if (!cid || !window.sb || !window.AUTH || !AUTH.orgId) return;
+  try {
+    const { data } = await sb.from('cohorts').select('brand').eq('id', cid).maybeSingle();
+    const b = (data && data.brand) || {};
+    A.brand = { ministry: b.ministry || '', department: b.department || '', organisation: b.organisation || '' };
+    if (A.brandTouched) return;                          // don't clobber anything typed while loading
+    const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v || ''; };
+    set('asmtBrandMinistry', A.brand.ministry);
+    set('asmtBrandDept',     A.brand.department);
+    set('asmtBrandOrg',      A.brand.organisation);
+  } catch (e){ /* leave the fields blank on failure */ }
 }
 
 function asmtConfirmDeploy(){
@@ -794,6 +825,20 @@ async function asmtDoDeploy(){
           if (oErr) throw oErr;
         } catch(e){ toast('Deployed, but saving objectives failed: ' + (e.message || e), 'err'); }
       }
+    }
+    // persist the cohort banner (Ministry / Department / Organisation) entered here
+    if (A.brand && (A.brand.ministry || A.brand.department || A.brand.organisation)){
+      try {
+        const { data: cur } = await sb.from('cohorts').select('brand').eq('id', cohortId).maybeSingle();
+        const merged = Object.assign({}, (cur && cur.brand) || {}, {
+          ministry:     (A.brand.ministry || '').trim(),
+          department:   (A.brand.department || '').trim(),
+          organisation: (A.brand.organisation || '').trim()
+        });
+        Object.keys(merged).forEach(k => { if (!merged[k]) delete merged[k]; });
+        await sb.from('cohorts').update({ brand: merged }).eq('id', cohortId);
+        if (typeof window.renderOrgBanner === 'function') window.renderOrgBanner();
+      } catch (e){ /* non-fatal: the assessment is already deployed */ }
     }
     _asmtListCache = { cid:null, list:null };
     state.asmt = { kind:'technical', stage:'eoca', name:'', step:0, creating:false };

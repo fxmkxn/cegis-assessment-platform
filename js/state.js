@@ -13,5 +13,6 @@ let state = { role:'admin', view:'dashboard', ptab:'tasks',
 function render(){
   document.getElementById('contextBar').style.display = state.role==='admin'?'':'none';
   document.getElementById('userAv').textContent = state.role==='admin'?'AD':initials(ME().n);
+  if(typeof renderOrgBanner==='function') renderOrgBanner();
   if(state.role==='admin') renderAdmin(); else renderParticipant();
 }
