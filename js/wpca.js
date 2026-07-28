@@ -157,10 +157,19 @@ function buildPanels(roster, subjects){
   var byLoad = function(a,b){ return (load[a.id]||0) - (load[b.id]||0); };
 
   // Pass 1 — managers are fixed by the hierarchy; tally their load up front.
+  // We ALSO attach each subject's direct reports as UPWARD ("managee") raters:
+  // everyone whose manager IS this subject rates this subject. That is the 4th
+  // rater direction (self / manager / peer / managee). `reportees` is a LIST
+  // (a subject can have several reports); the old singular `reportee` slot is
+  // kept as null purely for backward-compatibility with any older reader.
   subjects.forEach(function(s){
     var mgr = (s.mgr && roster.some(function(x){return x.id===s.mgr;})) ? s.mgr : null;
-    panels[s.id] = { mgr: mgr, reportee: null, peers: [] };
+    var reportees = roster
+      .filter(function(r){ return r.mgr === s.id; })   // people who report to s
+      .map(function(r){ return r.id; });
+    panels[s.id] = { mgr: mgr, reportee: null, reportees: reportees, peers: [] };
     inc(mgr);
+    reportees.forEach(inc);                            // each report now owes 1 upward review
   });
 
   // Pass 2 — peers: enforce the city rule, break ties by lowest load.
@@ -203,6 +212,7 @@ function workloadCount(pid){
     var p = set.panels[s.id]; if (!p) return;
     if (p.mgr === pid) c++;
     if (p.peers && p.peers.indexOf(pid) !== -1) c++;
+    if (p.reportees && p.reportees.indexOf(pid) !== -1) c++;   // upward review of one's manager
   });
   return c;
 }
@@ -231,11 +241,15 @@ function vWPCA(){
     var peerChips = (p.peers||[]).map(function(pid, idx){ return wpcaRaterChip(pid, s, 'peer', s.id, idx); }).join('') || '<span class="muted small">—</span>';
     var mgrChip = p.mgr ? wpcaRaterChip(p.mgr, s, 'mgr', s.id)
       : (set.hier ? '<span class="badge warn">⚠ no manager</span>' : '<span class="tag">n/a</span>');
+    // upward raters: this subject's direct reports (empty for individual contributors)
+    var repChips = (p.reportees||[]).map(function(pid){ return wpcaRaterChip(pid, s, 'reportee', s.id); }).join('') || '<span class="muted small">—</span>';
+    // "incomplete" is unchanged: reportees are OPTIONAL (not everyone manages people),
+    // so a panel is still complete on self + manager + 3 peers.
     var incomplete = ((p.peers||[]).length < 3) || (set.hier && !p.mgr);
     return '<tr><td><b>'+wpcaEsc(s.n)+'</b><div class="muted small">'+wpcaEsc(wpcaMeta(s))+'</div>'+
       (incomplete ? '<span class="badge warn" style="margin-top:4px">⚠ incomplete panel</span>' : '')+'</td>'+
       '<td><span class="chip"><span class="av">Self</span></span></td>'+
-      '<td>'+mgrChip+'</td><td>'+peerChips+'</td></tr>';
+      '<td>'+mgrChip+'</td><td>'+peerChips+'</td><td>'+repChips+'</td></tr>';
   }).join('');
 
   var roundSel = '<select id="wpcaRound" class="btn ghost sm" style="appearance:auto">'+
@@ -258,7 +272,7 @@ function vWPCA(){
       '<div class="pad" style="border-bottom:1px solid var(--g200)"><div class="flex jb ac wrap">'+
         '<h3>Peer matrix · '+set.subjects.length+' subjects</h3>'+
         '<span class="muted small">Click any peer chip to swap · 📍 same location · ⇄ cross-workstream</span></div></div>'+
-      '<div style="overflow:auto"><table><thead><tr><th>Subject</th><th>Self</th><th>Manager</th><th>Peers (×3)</th></tr></thead>'+
+      '<div style="overflow:auto"><table><thead><tr><th>Subject</th><th>Self</th><th>Manager</th><th>Peers (×3)</th><th>Reports (upward)</th></tr></thead>'+
       '<tbody>'+rows+'</tbody></table></div>'+
     '</div></div>';
 }
@@ -369,7 +383,8 @@ function doSwap(subId, peerIdx, newId){
 function approveWPCA(){
   var set = wpcaSet();
   var total = 0;
-  set.subjects.forEach(function(s){ var p=set.panels[s.id]||{peers:[]}; total += 1 + (p.mgr?1:0) + (p.peers||[]).length; });
+  // invitations per subject = self + manager + peers + upward reports
+  set.subjects.forEach(function(s){ var p=set.panels[s.id]||{peers:[]}; total += 1 + (p.mgr?1:0) + (p.peers||[]).length + (p.reportees||[]).length; });
   var roundName = (document.getElementById('wpcaRound') || {}).value || 'Week 2';
 
   if (typeof showModal === 'function') showModal({
@@ -384,7 +399,7 @@ function wpcaDoRollout(roundName){
   if (typeof closeModal==='function') closeModal();
   var set = wpcaSet();
   var total = 0;
-  set.subjects.forEach(function(s){ var p=set.panels[s.id]||{peers:[]}; total += 1 + (p.mgr?1:0) + (p.peers||[]).length; });
+  set.subjects.forEach(function(s){ var p=set.panels[s.id]||{peers:[]}; total += 1 + (p.mgr?1:0) + (p.peers||[]).length + (p.reportees||[]).length; });
 
   if (!wpcaLive()){
     if (typeof toast==='function') toast('WPCA '+roundName+' rolled out · '+total+' invitations sent','ok');
@@ -393,10 +408,20 @@ function wpcaDoRollout(roundName){
   }
 
   // LIVE: build the panels payload and call the atomic roll-out RPC.
-  // reportee is intentionally null — panels are self + manager + 3 peers.
+  // `reportees` carries the upward raters. NOTE: the roll_out_wpca_round DB
+  // function must be updated to READ this key and create the matching upward
+  // wpca_panels rows (see the migration note that ships with this change).
+  // Until then the extra key is simply ignored by Postgres, so sending it is
+  // safe and changes nothing in the current live behaviour.
   var payload = set.subjects.map(function(s){
     var p = set.panels[s.id] || { peers:[] };
-    return { subject:s.id, manager:p.mgr||null, reportee:null, peers:(p.peers||[]).filter(Boolean) };
+    return {
+      subject:   s.id,
+      manager:   p.mgr || null,
+      reportee:  null,                                  // legacy slot, kept for compatibility
+      reportees: (p.reportees || []).filter(Boolean),   // NEW: upward / managee raters
+      peers:     (p.peers || []).filter(Boolean)
+    };
   });
 
   if (typeof mountOctopus==='function'){ var m=document.querySelector('.main'); if(m) mountOctopus(m,'Rolling out the 360 and sending invitations…'); }

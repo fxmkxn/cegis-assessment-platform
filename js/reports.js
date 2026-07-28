@@ -152,6 +152,44 @@ function techRadarChart(chart){
 }
 function firstSvg(html){ if(!html) return null; const a=html.indexOf('<svg'); const b=html.indexOf('</svg>'); return (a>=0&&b>=0)?html.slice(a,b+6):null; }
 
+/* ------------------------------------------------------------------
+   DERIVED application summary (Phase-9 WPCAS)
+   ------------------------------------------------------------------
+   The Google Form used to ask two extra things directly:
+     • an "overall application rating" (a 4-point band), and
+     • "developmental focus areas".
+   We no longer ask them - we DERIVE them from the 21 behavioural ratings
+   that already feed the radar, so there is nothing extra to capture.
+
+   Input `radar` is the same object the radar chart uses:
+     { axes:[names], self:[scores], others:[pooled scores] }.
+   The radar is drawn on a 0-5 scale (see radarChart, max=5), so we band on /5.
+   Returns null when there isn't enough 360 data yet (so the card just hides).
+   ------------------------------------------------------------------ */
+function wpcaDerivedApplication(radar){
+  if(!radar || !Array.isArray(radar.axes) || !radar.axes.length) return null;
+  const axes = radar.axes;
+  // prefer the pooled OTHER-rater view (the real 360 signal); fall back to self
+  // if others are withheld for confidentiality.
+  const vals = (radar.others && radar.others.length === axes.length) ? radar.others : (radar.self || []);
+  if(!vals.length) return null;
+  // pair each competency with its score, dropping any axis without a number
+  const pairs = axes
+    .map((a,i)=>({ axis:a, v:(typeof vals[i]==='number' ? vals[i] : null) }))
+    .filter(p => p.v != null);
+  if(!pairs.length) return null;
+
+  const mean = pairs.reduce((s,p)=>s+p.v, 0) / pairs.length;
+  // 4-point band on the /5 radar scale (matches the "of 5" behavioural score)
+  const band = mean < 1     ? 'Not yet observed'
+             : mean < 2.5   ? 'Applying with support'
+             : mean < 3.75  ? 'Applying independently'
+             :                'Applying and guiding others';
+  // development focus = the two LOWEST-scoring competencies (scale-independent)
+  const focus = pairs.slice().sort((a,b)=>a.v-b.v).slice(0,2).map(p=>p.axis);
+  return { band, mean, focus };
+}
+
 /* ============================================================
    RENDER A PERSISTED REPORT  (shared by participant + admin views)
    ============================================================ */
@@ -180,6 +218,15 @@ function renderReportFrom(content, opts){
   const suppNote=(content.notes&&content.notes.behavioral_suppressed)
     ? `<p class="muted small" style="margin-top:8px">Pooled-other ratings are withheld because fewer than ${content.notes.anonymity_floor||3} raters responded — protecting rater confidentiality. Only the self-assessment is charted.</p>`
     : '';
+  // DERIVED (not asked directly): overall application band + development focus,
+  // computed from the same 21 ratings on the radar. Hidden when there's no data.
+  const derived = wpcaDerivedApplication(c.radar);
+  const derivedCard = derived ? `<div class="card pad" style="margin-top:12px">
+        <span class="ai-label">✦ Derived from the 21 ratings</span>
+        <div class="rep-2col" style="margin-top:10px">
+          <div><div class="muted small">Overall application</div><b>${rEsc(derived.band)}</b></div>
+          <div><div class="muted small">Development focus (2 lowest)</div><b>${derived.focus.map(rEsc).join(' · ')||'—'}</b></div>
+        </div></div>` : '';
   const regenBtn = opts.canRegenerate
     ? `<button class="btn ghost sm" onclick="reportsRegenerate('${opts.pid}',${opts.admin?true:false})">↻ Regenerate</button>` : '';
   const backBtn = opts.admin
@@ -219,6 +266,7 @@ function renderReportFrom(content, opts){
         <div class="card pad" style="display:flex;justify-content:center">${radarChart(c.radar)}</div>
         ${c.radar?`<div class="legend" style="justify-content:center"><span><i style="background:var(--indigo)"></i>Self</span>${(c.radar.others)?'<span><i style="background:var(--teal)"></i>Others (aggregated)</span>':''}</div>`:''}
         ${suppNote}
+        ${derivedCard}
         <div class="ai-block"><span class="ai-label">✦ AI synthesis</span>
         <p style="margin:8px 0 0">${rEsc(n.behavioral_synthesis||'')}</p></div></section>`:''}
 
