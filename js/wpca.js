@@ -697,33 +697,30 @@ function wpcaSubjectLabel(o){
   return o.subject_name || o.subjectName || o.subject || o.name || '';
 }
 
-/* Build the question text actually shown to the reviewer.
+/* Canonical WPCA 360 question wrapper — the SINGLE source of truth shared by
+   the admin "Participant preview" (assessments.js) and the participant player
+   below, so the two can never drift apart. It mirrors the preview exactly:
 
-   The instrument stores each item's stem verbatim (the CSV "ques" column),
-   and some stems contain placeholders that must be filled in at display time:
-     - "this competency"  -> the question's own competency name
-                             (e.g. "apply this competency at work"
-                                 -> "apply Data-led Decision Making at work")
-     - {name}/{{name}}/[name]/{subject}  -> the person being reviewed
-                             (only if the instrument uses such a token; if not,
-                              nothing changes)
-   Without this, the reviewer only sees the raw stem. */
-function wpcaQuestionPrompt(q, subjectName){
-  var prompt = (q && q.prompt != null) ? String(q.prompt) : '';
-  var comp = Array.isArray(q.competency)
-    ? q.competency.filter(Boolean).join(' / ')
-    : (q.competency || '');
+       In the last two weeks, did [name] <stem>?
 
-  // 1) "this competency" -> the actual competency name
-  if (comp) prompt = prompt.replace(/\bthis competency\b/gi, comp);
+   - lead-in "In the last two weeks, did [name] " and the trailing "?" are
+     rendered muted (grey), matching the preview.
+   - [name] is kept as a LITERAL placeholder, exactly as the preview shows it
+     (the preview never fills it in). If you'd prefer the actual person's name,
+     that's a small change — see the note in the handover.
+   - <stem> is the instrument's question text, rendered with the same
+     **bold** / *italic* / line-break markdown the preview uses.
 
-  // 2) name-style tokens -> the subject (harmless no-op when absent)
-  if (subjectName) {
-    prompt = prompt
-      .replace(/\{\{?\s*(name|subject|subject_name)\s*\}?\}/gi, subjectName)
-      .replace(/\[\s*(name|subject|subject_name)\s*\]/gi, subjectName);
-  }
-  return prompt;
+   `stemId` is optional: the admin editor passes an element id so it can live-
+   update just the stem as the author types; the player passes nothing. */
+function wpca360PromptHtml(prompt, stemId){
+  var idAttr = stemId ? ' id="' + stemId + '"' : '';
+  var stem = (typeof mdToSafeHtml === 'function')
+    ? mdToSafeHtml(prompt)
+    : (typeof wpcaEsc === 'function' ? wpcaEsc(prompt || '') : String(prompt == null ? '' : prompt));
+  return '<span class="muted">In the last two weeks, did [name] </span>' +
+         '<span' + idAttr + '>' + (stem || '<span class="muted">(empty)</span>') + '</span>' +
+         '<span class="muted">?</span>';
 }
 
 function wpcaRenderReview(){
@@ -751,7 +748,7 @@ function wpcaRenderReview(){
     return '<div class="card pad" style="margin-bottom:12px">'+
       '<div class="flex jb ac" style="margin-bottom:6px"><span class="tag">Q'+(i+1)+(comp?(' · '+wpcaEsc(comp)):'')+'</span>'+
       (saving? '<span class="muted small">saving…</span>' : (chosen!=null?'<span class="muted small">saved ✓</span>':''))+'</div>'+
-      '<p style="margin:0 0 12px;font-weight:600">'+wpcaEsc(wpcaQuestionPrompt(q, wpcaSubjectLabel(d)))+'</p>'+
+      '<p style="margin:0 0 12px;font-weight:600;line-height:1.5">'+wpca360PromptHtml(q.prompt)+'</p>'+
       '<div class="likert">'+btns+'</div></div>';
   }).join('');
 

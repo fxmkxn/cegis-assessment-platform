@@ -431,7 +431,11 @@ function asmtValidateView(A){
       <td><span class="tag">${(q.type==='mcq'?'mcqsca':q.type==='multi'?'mcqmca':q.type).toUpperCase()}</span></td>
       <td>${q.level?`<span class="tag">${q.level}</span>`:'—'}</td>
       <td style="max-width:300px">${A.kind==='wpca'
-        ? (q.prompt ? `In the last two weeks, did <span class="muted">[name]</span> ${_asmtEsc(q.prompt)}?` : '<span class="muted">(blank)</span>')
+        ? (q.prompt
+            ? (typeof wpca360PromptHtml === 'function'
+                ? wpca360PromptHtml(q.prompt)
+                : `In the last two weeks, did <span class="muted">[name]</span> ${_asmtEsc(q.prompt)}?`)
+            : '<span class="muted">(blank)</span>')
         : (q.prompt || '<span class="muted">(blank)</span>')}</td>
       <td>${q.options.length || '—'}</td>
       <td>${(q.competency||[]).map(c=>`<span class="tag">${c}</span>`).join(' ')||'—'}</td>
@@ -495,7 +499,14 @@ function asmtEditorCard(q, i){
 
     <div class="muted small" style="margin:12px 0 4px;font-weight:600">Participant preview</div>
     <div style="background:var(--g50);border:1px solid var(--g200);border-radius:8px;padding:12px">
-      <div style="font-weight:600;line-height:1.5">${isW?'<span class="muted">In the last two weeks, did [name] </span>':''}<span id="asmtPrev${i}">${mdToSafeHtml(q.prompt)||'<span class="muted">(empty)</span>'}</span>${isW?'<span class="muted">?</span>':''}</div>
+      <div style="font-weight:600;line-height:1.5">${
+        isW
+          ? (typeof wpca360PromptHtml === 'function'
+              ? wpca360PromptHtml(q.prompt, 'asmtPrev'+i)
+              /* fallback if wpca.js isn't loaded — same markup the shared fn emits */
+              : `<span class="muted">In the last two weeks, did [name] </span><span id="asmtPrev${i}">${mdToSafeHtml(q.prompt)||'<span class="muted">(empty)</span>'}</span><span class="muted">?</span>`)
+          : `<span id="asmtPrev${i}">${mdToSafeHtml(q.prompt)||'<span class="muted">(empty)</span>'}</span>`
+      }</div>
       <div style="margin-top:12px">${asmtPreviewControls(q)}</div>
     </div>
 
