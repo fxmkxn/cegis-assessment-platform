@@ -208,35 +208,83 @@ function workloadCount(pid){
 }
 
 /* ============================================================
+   WPCA DRAFT — save/restore an in-progress config (no roll-out)
+   ------------------------------------------------------------
+   "Save draft" stores a JSON snapshot of the panels for this cohort
+   in the wpca_drafts table via the save_wpca_draft RPC. It sends NO
+   invitations and creates NO round — that is still only "Approve &
+   roll out". When the configurator opens, wpcaLoadConfig() overlays
+   any saved draft so the admin resumes exactly where they left off,
+   even on another device or as another admin in the same org.
+   ============================================================ */
+
+/* Build the panels payload array (the shape both roll-out AND save expect). */
+function wpcaPanelsPayload(){
+  var set = wpcaSet();
+  return set.subjects.map(function(s){
+    var p = set.panels[s.id] || { peers:[] };
+    // reportee is intentionally null — panels are self + manager + 3 peers.
+    return { subject:s.id, manager:p.mgr||null, reportee:null, peers:(p.peers||[]).filter(Boolean) };
+  });
+}
+
+/* Friendly timestamp for the "Draft saved …" label. */
+function wpcaWhen(iso){
+  try { return new Date(iso).toLocaleString(); } catch(e){ return ''; }
+}
+
+/* Save the current configurator state as a draft. NO roll-out, NO invitations. */
+function saveWpcaDraft(){
+  // Demo mode has no backend — acknowledge so the button is still explorable.
+  if (!wpcaLive()){
+    if (typeof toast==='function') toast('Draft saved (demo — not persisted)','ok');
+    return;
+  }
+  var roundName = (document.getElementById('wpcaRound') || {}).value || 'Week 2';
+  var payload   = wpcaPanelsPayload();
+
+  var btn = document.getElementById('saveDraftBtn');
+  if (btn){ btn.disabled = true; btn.textContent = 'Saving…'; }
+
+  dbSaveWpcaDraft(WPCA.cohortId, WPCA.instrumentId, roundName, payload)
+    .then(function(row){
+      WPCA.draftSavedAt = (row && row.updated_at) || new Date().toISOString();
+      WPCA.draftRound   = roundName;
+      if (typeof toast==='function') toast('Draft saved','ok');
+      if (typeof renderAdmin==='function') renderAdmin();   // refresh the label
+    })
+    .catch(function(err){
+      if (typeof toast==='function') toast((err && err.message) || 'Could not save draft','err');
+      if (btn){ btn.disabled = false; btn.textContent = 'Save draft'; }
+    });
+}
+
+/* Overlay a saved draft onto the freshly auto-built WPCA.panels so the admin
+   resumes exactly where they left off. Defensive: the roster may have changed
+   since the draft was saved, so we only re-apply raters/subjects that STILL
+   exist, and keep the auto-built panel for any subject the draft doesn't cover. */
+function wpcaApplyDraft(draft){
+  var exists = {};
+  (WPCA.roster||[]).forEach(function(r){ exists[r.id] = true; });
+  var isSubject = {};
+  (WPCA.subjects||[]).forEach(function(s){ isSubject[s.id] = true; });
+
+  (draft.panels||[]).forEach(function(p){
+    if (!p || !isSubject[p.subject]) return;               // subject gone -> skip
+    var mgr   = (p.manager && exists[p.manager]) ? p.manager : null;
+    var peers = (p.peers||[]).filter(function(id){ return exists[id]; });
+    WPCA.panels[p.subject] = { mgr: mgr, reportee: null, peers: peers };
+  });
+
+  WPCA.draftRound   = draft.round_name || null;
+  WPCA.draftSavedAt = draft.updated_at || null;
+}
+
+/* ============================================================
    ADMIN — Smart Configurator view
    ============================================================ */
 function vWPCA(){
-  // --- Cohort-switch cache invalidation -------------------------------------
-  // The working set (roster/subjects/panels) is cached and only rebuilt when
-  // WPCA.loaded is false. Without this block, switching the cohort selector
-  // would keep showing the PREVIOUS cohort's panels, because WPCA.loaded is
-  // still true. So: if the currently-selected cohort differs from the one we
-  // actually loaded (WPCA.cohortId), wipe the cache to force a fresh reload.
-  //
-  // Notes:
-  //  - WPCA.cohortId is null on the very first open, so this correctly does
-  //    nothing until a real cohort has been loaded once.
-  //  - wpcaLoadConfig() sets WPCA.cohortId to the new id immediately, so a
-  //    reload in progress won't re-trigger this (no infinite loop).
-  if (wpcaLive()){
-    var selectedCohort = wpcaCohortId();                 // what's chosen right now
-    if (selectedCohort && WPCA.cohortId && selectedCohort !== WPCA.cohortId){
-      WPCA.loaded  = false;                              // force wpcaLoadConfig() below
-      WPCA.loading = false;
-      WPCA.err     = null;
-      WPCA.roster = []; WPCA.subjects = []; WPCA.panels = {};   // drop stale cohort data
-      WPCA.instrumentId = null; WPCA.instrumentName = null;
-    }
-  }
-  // --------------------------------------------------------------------------
-
-  // LIVE: load the cohort + instrument the first time the view opens
-  // (or after the cache was invalidated just above).
+  // LIVE: load the cohort + instrument the first time the view opens.
   if (wpcaLive() && !WPCA.loaded){
     if (!WPCA.loading){ wpcaLoadConfig(); }   // fire and re-render on completion
     if (WPCA.err){
@@ -263,14 +311,26 @@ function vWPCA(){
       '<td>'+mgrChip+'</td><td>'+peerChips+'</td></tr>';
   }).join('');
 
+  // Remember the round chosen when the draft was saved (default Week 2).
+  var savedRound = WPCA.draftRound || 'Week 2';
   var roundSel = '<select id="wpcaRound" class="btn ghost sm" style="appearance:auto">'+
-    '<option>Week 2</option><option>Week 4</option><option>Week 6</option></select>';
+    ['Week 2','Week 4','Week 6'].map(function(w){
+      return '<option'+(w===savedRound?' selected':'')+'>'+w+'</option>';
+    }).join('')+'</select>';
+
+  // Small line under the title telling the admin a draft exists (and when).
+  var draftNote = WPCA.draftSavedAt
+    ? '<div class="muted small" style="margin:-6px 0 12px">✔ Draft saved '+
+        wpcaEsc(wpcaWhen(WPCA.draftSavedAt))+' · not yet rolled out</div>'
+    : '';
 
   return '<div class="crumb">Lifecycle / WPCA · 360</div>'+
   '<div class="page-head"><h1>WPCA Smart Configurator</h1>'+
     '<div class="flex g12 ac">'+roundSel+
       '<button class="btn ghost" onclick="reassign()">↻ Re-run assignment</button>'+
+      '<button class="btn ghost" id="saveDraftBtn" onclick="saveWpcaDraft()">Save draft</button>'+
       '<button class="btn" id="approveBtn" onclick="approveWPCA()">Approve &amp; roll out</button></div></div>'+
+  draftNote+
   '<div class="grid" style="grid-template-columns:300px 1fr">'+
     '<div>'+
       '<div class="card pad" style="margin-bottom:14px"><h3 style="margin-bottom:4px">Workload health</h3>'+
@@ -357,41 +417,27 @@ function reassign(){
   }, 700);
 }
 
-/* Peer-swap modal — shows EVERY eligible rater, sorted lowest-load -> highest.
-   (Previously this was capped at the 8 lowest-load people via cands.slice(0,8);
-   now we render the full list inside a scrollable box.) */
+/* Peer-swap modal — candidates ranked by current review load. */
 function openSwap(subId, peerIdx){
   var set = wpcaSet();
-  var sub = wpcaFind(subId); if (!sub) return;          // the subject being reviewed
-  var panel = set.panels[subId]; if (!panel) return;    // that subject's current panel
-  var current = panel.peers[peerIdx];                   // the peer we're about to replace
-
-  // Mark everyone already on this panel (subject, manager, the 3 peers) as "used"
-  // so we don't offer them again -- EXCEPT the current peer, who is allowed to stay.
-  var used = {};
-  [subId, panel.mgr].concat(panel.peers||[]).filter(Boolean).forEach(function(x){ used[x]=true; });
-
-  // Candidate list: everyone eligible, minus the already-used people,
-  // sorted ASCENDING by current review load (fewest reviews first).
+  var sub = wpcaFind(subId); if (!sub) return;
+  var panel = set.panels[subId]; if (!panel) return;
+  var current = panel.peers[peerIdx];
+  var used = {}; [subId, panel.mgr].concat(panel.peers||[]).filter(Boolean).forEach(function(x){ used[x]=true; });
   var cands = wpcaEligiblePeers(sub)
     .filter(function(r){ return !used[r.id] || r.id===current; })
     .sort(function(a,b){ return workloadCount(a.id)-workloadCount(b.id); });
-
-  // Render EVERY candidate (no .slice cap anymore) as a clickable row.
-  var opts = cands.map(function(r){
+  var opts = cands.slice(0,8).map(function(r){
     var load = workloadCount(r.id);
-    var badge = load>6 ? 'err' : (load<2 ? 'info' : 'ok');   // colour the load pill
+    var badge = load>6 ? 'err' : (load<2 ? 'info' : 'ok');
     return '<div class="flex ac jb" style="padding:9px 10px;border:1px solid var(--g200);border-radius:9px;margin-bottom:7px;cursor:pointer'+(r.id===current?';background:var(--indigo-l)':'')+'" onclick="doSwap(\''+subId+'\','+peerIdx+',\''+r.id+'\')">'+
       '<div class="flex ac g8"><span class="av" style="width:28px;height:28px;border-radius:50%;background:var(--teal);color:#fff;display:grid;place-items:center;font-size:10px;font-weight:700">'+wpcaInitials(r.n)+'</span>'+
       '<div><b>'+wpcaEsc(r.n)+'</b><div class="muted small">'+wpcaEsc(wpcaMeta(r))+'</div></div></div>'+
       '<span class="badge '+badge+'">load '+load+'</span></div>';
   }).join('') || '<div class="muted small">No other eligible raters available.</div>';
-
-  // The full roster can be long, so wrap the rows in a scrollable box.
   if (typeof showModal === 'function') showModal({
     title:'Swap a peer for '+wpcaEsc(sub.n.split(/\s+/)[0]),
-    body:'<div class="muted small" style="margin-bottom:10px">'+cands.length+' eligible raters, sorted from lowest review load to highest. Swapping recomputes the workload graph live.</div>'+
-         '<div style="max-height:360px;overflow:auto;padding-right:2px">'+opts+'</div>',
+    body:'<div class="muted small" style="margin-bottom:10px">Candidates ranked by current review load. Swapping recomputes the workload graph live.</div>'+opts,
     confirm:null, onConfirm:null
   });
 }
@@ -450,6 +496,9 @@ function wpcaDoRollout(roundName){
     var d = res.data || {};
     var inv = (d.invitations != null) ? d.invitations : total;
     if (typeof toast==='function') toast('WPCA '+roundName+' rolled out · '+inv+' invitations sent','ok');
+    // the draft has been rolled out for real — remove it so it can't be re-used
+    if (typeof dbDeleteWpcaDraft==='function') dbDeleteWpcaDraft(WPCA.cohortId).catch(function(){});
+    WPCA.draftSavedAt = null; WPCA.draftRound = null;
     // force a fresh load next time the configurator opens
     WPCA.loaded = false; WPCA.tasks = null;
     if (typeof go==='function') go('dashboard'); else if (typeof renderAdmin==='function') renderAdmin();
@@ -494,8 +543,15 @@ function wpcaLoadConfig(){
         : WPCA.roster.slice();
       if (!WPCA.subjects.length) WPCA.subjects = WPCA.roster.slice();
       WPCA.panels = buildPanels(WPCA.roster, WPCA.subjects);
-      WPCA.loaded = true; WPCA.loading = false;
-      if (typeof renderAdmin==='function') renderAdmin();
+      // Overlay a saved draft (if any). Best-effort: if the draft read fails
+      // we still show the freshly auto-built panels rather than an error.
+      return dbLoadWpcaDraft(cohortId)
+        .then(function(draft){ if (draft && Array.isArray(draft.panels)) wpcaApplyDraft(draft); })
+        .catch(function(){ /* no draft / read failed — ignore, keep auto-build */ })
+        .then(function(){
+          WPCA.loaded = true; WPCA.loading = false;
+          if (typeof renderAdmin==='function') renderAdmin();
+        });
     })
     .catch(function(err){
       WPCA.loading=false; WPCA.loaded=true; WPCA.err=(err && err.message) || 'Could not load the cohort.';
@@ -547,11 +603,10 @@ function wpcaRoleLabel(role){
 }
 
 function wpcaTaskRowLive(t){
-  var subjName = wpcaSubjectLabel(t);                    // accept subject_name or aliases
-  var initialsName = wpcaInitials(subjName || '?');
+  var initialsName = wpcaInitials(t.subject_name || '?');
   var pct = t.total_q ? Math.round((t.answered_q/t.total_q)*100) : 0;
   var done = t.status === 'complete';
-  var sub = (t.rater_role==='self') ? 'Yourself' : wpcaEsc(subjName || 'colleague');
+  var sub = (t.rater_role==='self') ? 'Yourself' : wpcaEsc(t.subject_name);
   var btn = done
     ? '<span class="badge ok">✓ submitted</span>'
     : '<button class="btn ghost sm" onclick="wpcaOpenReview(\''+t.panel_id+'\')">'+(t.answered_q? 'Continue →':'Start review →')+'</button>';
@@ -629,110 +684,6 @@ function wpcaOpenReview(panelId){
   });
 }
 
-/* ------------------------------------------------------------------
-   Per-question options for the 360 player.
-
-   The uploaded WPCA instrument carries its OWN options. Depending on how
-   start_wpca_review() shapes them, a question can arrive as ANY of:
-     - q.options = ["Never","Rarely",...]                (array of strings)
-     - q.options = [{ordinal,label}] / [{text}] / ...    (array of objects)
-     - q.opt1 .. q.optN on the question itself           (mirrors the CSV template)
-   The earlier version only understood {ordinal,label} and returned an EMPTY
-   list for anything else -- which is why the survey rendered prompts with no
-   answer buttons. We now normalise all of the above and, only if nothing
-   usable is found, fall back to the built-in 5-point scale so the question is
-   never left un-answerable.
-   ------------------------------------------------------------------ */
-function wpcaLikertFallback(){
-  return WPCA_LIKERT.map(function(lbl, i){ return { ordinal: i+1, label: lbl }; });
-}
-function wpcaQuestionOptions(q){
-  if (!q) return wpcaLikertFallback();
-
-  // ---- shape 1: q.options is an array (of strings or objects) ----
-  var raw = q.options;
-  if (Array.isArray(raw) && raw.length){
-    var out = [];
-    raw.forEach(function(o, i){
-      if (o == null) return;
-      var label, ordinal = i + 1;
-      if (typeof o === 'string' || typeof o === 'number'){
-        label = String(o);                                  // plain string option
-      } else if (typeof o === 'object'){
-        // accept whichever label-ish key the RPC used
-        label = (o.label != null) ? o.label
-              : (o.text  != null) ? o.text
-              : (o.name  != null) ? o.name
-              : (o.option!= null) ? o.option
-              : (o.caption!=null) ? o.caption
-              : (o.value != null) ? o.value : null;
-        if (o.ordinal != null) ordinal = o.ordinal;         // keep the real ordinal
-      }
-      if (label != null && String(label).trim() !== ''){
-        out.push({ ordinal: ordinal, label: String(label).trim() });
-      }
-    });
-    if (out.length) return out;                             // real options found
-  }
-
-  // ---- shape 2: opt1..optN fields sitting directly on the question ----
-  var flat = [];
-  for (var n = 1; n <= 8; n++){
-    var v = q['opt' + n];
-    if (v != null && String(v).trim() !== '') flat.push({ ordinal: n, label: String(v).trim() });
-  }
-  if (flat.length) return flat;
-
-  // ---- fallback: built-in 5-point scale (demo / options-less instruments) ----
-  return wpcaLikertFallback();
-}
-
-/* The subject's display name may arrive under different keys depending on
-   the RPC. subject_name is expected, but we accept a few aliases so a
-   backend field rename doesn't blank out every name in the participant UI.
-   NOTE: this can only surface a name the server actually sent -- if the RPC
-   returns no name at all, that's a data/backend issue, not a client one. */
-function wpcaSubjectLabel(o){
-  if (!o) return '';
-  return o.subject_name || o.subjectName || o.subject || o.name || '';
-}
-
-/* Canonical WPCA 360 question wrapper — the SINGLE source of truth shared by
-   the admin "Participant preview" (assessments.js) and the participant player
-   below, so the two can never drift apart. It mirrors the preview exactly:
-
-       In the last two weeks, did <name> <stem>?
-
-   - the lead-in and the trailing "?" are rendered muted (grey).
-   - <name>: the admin preview has no subject, so it shows the literal
-     placeholder "[name]". The participant player DOES know who is being
-     reviewed and passes that name in, so reviewers see the real person
-     (e.g. "...did Nabajit apply this competency at work?").
-   - <stem> is the instrument's question text, rendered with the same
-     **bold** / *italic* / line-break markdown the preview uses.
-
-   Args:
-     prompt  - the raw question stem.
-     stemId  - optional element id; the admin editor passes one so it can
-               live-update just the stem as the author types. Player omits it.
-     subject - optional subject name; when given (player), it replaces the
-               "[name]" placeholder. When omitted (preview), "[name]" stays. */
-function wpca360PromptHtml(prompt, stemId, subject){
-  var idAttr = stemId ? ' id="' + stemId + '"' : '';
-
-  var who = (subject != null && String(subject).trim() !== '')
-    ? ((typeof wpcaEsc === 'function') ? wpcaEsc(String(subject).trim()) : String(subject).trim())
-    : '[name]';
-
-  var stem = (typeof mdToSafeHtml === 'function')
-    ? mdToSafeHtml(prompt)
-    : (typeof wpcaEsc === 'function' ? wpcaEsc(prompt || '') : String(prompt == null ? '' : prompt));
-
-  return '<span class="muted">In the last two weeks, did ' + who + ' </span>' +
-         '<span' + idAttr + '>' + (stem || '<span class="muted">(empty)</span>') + '</span>' +
-         '<span class="muted">?</span>';
-}
-
 function wpcaRenderReview(){
   var main = document.querySelector('.main'); if (!main) return;
   var R = WPCA.review; if (!R){ return; }
@@ -749,28 +700,26 @@ function wpcaRenderReview(){
     var comp = Array.isArray(q.competency) ? q.competency.filter(Boolean).join(' · ') : (q.competency||'');
     var chosen = R.answers[q.question_id];
     var saving = R.saving[q.question_id];
-    // Render THIS question's own options (falls back to the 5-point scale in demo).
-    // The button's value is the option ordinal, so wpcaAnswer/save_wpca_response
-    // receive the correct choice for whatever scale the instrument uses.
-    var btns = wpcaQuestionOptions(q).map(function(o){
-      return '<button class="'+(chosen===o.ordinal?'sel':'')+'" onclick="wpcaAnswer(\''+q.question_id+'\','+o.ordinal+')">'+wpcaEsc(o.label)+'</button>';
+    var btns = WPCA_LIKERT.map(function(lbl, idx){
+      var val = idx+1;
+      return '<button class="'+(chosen===val?'sel':'')+'" onclick="wpcaAnswer(\''+q.question_id+'\','+val+')">'+lbl+'</button>';
     }).join('');
     return '<div class="card pad" style="margin-bottom:12px">'+
       '<div class="flex jb ac" style="margin-bottom:6px"><span class="tag">Q'+(i+1)+(comp?(' · '+wpcaEsc(comp)):'')+'</span>'+
       (saving? '<span class="muted small">saving…</span>' : (chosen!=null?'<span class="muted small">saved ✓</span>':''))+'</div>'+
-      '<p style="margin:0 0 12px;font-weight:600;line-height:1.5">'+wpca360PromptHtml(q.prompt, null, wpcaSubjectLabel(d))+'</p>'+
+      '<p style="margin:0 0 12px;font-weight:600">'+wpcaEsc(q.prompt)+'</p>'+
       '<div class="likert">'+btns+'</div></div>';
   }).join('');
 
   var canSubmit = (answered === qs.length) && qs.length > 0 && !R.submitting;
   main.innerHTML =
     '<div class="page-head"><div><div class="crumb">My 360 Tasks / Review</div>'+
-      '<h1>Reviewing '+wpcaEsc(wpcaSubjectLabel(d)||'colleague')+'</h1></div>'+
+      '<h1>Reviewing '+wpcaEsc(d.subject_name||'colleague')+'</h1></div>'+
       '<button class="btn ghost" onclick="wpcaCloseReview()">← Back</button></div>'+
     '<div class="card pad" style="margin-bottom:14px"><div class="flex jb small"><span class="muted">'+wpcaEsc(d.instrument||'WPCA Instrument')+'</span><b>'+answered+'/'+qs.length+'</b></div>'+
       '<div class="bar" style="margin:8px 0 0"><i style="width:'+pct+'%"></i></div></div>'+
     blocks+
-    '<div class="flex jb ac" style="margin-top:8px"><span class="muted small">Your individual ratings stay confidential — '+wpcaEsc(wpcaSubjectLabel(d)||'the subject')+' only ever sees pooled, anonymized competency scores.</span>'+
+    '<div class="flex jb ac" style="margin-top:8px"><span class="muted small">Your individual ratings stay confidential — '+wpcaEsc(d.subject_name||'the subject')+' only ever sees pooled, anonymized competency scores.</span>'+
     '<button class="btn" '+(canSubmit?'':'disabled')+' onclick="wpcaSubmitReview()">'+(R.submitting?'Submitting…':'Submit review')+'</button></div>';
 }
 

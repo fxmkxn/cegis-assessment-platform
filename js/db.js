@@ -36,6 +36,40 @@ async function dbImportRoster(cohortId, rows, columnMap, filePath) {
   return data;
 }
 
+// ---------- WPCA draft (save a panel config WITHOUT rolling it out) ----------
+// A draft is one JSON snapshot of the panels for a cohort. Saving overwrites
+// the previous draft (there is only ever one per cohort). Saving never sends
+// invitations — rolling out is still a separate, explicit action.
+
+// Save / overwrite the draft for a cohort. `panels` is the SAME array shape the
+// roll-out RPC uses: [{ subject, manager, reportee, peers:[...] }, ...].
+async function dbSaveWpcaDraft(cohortId, assessmentId, roundName, panels) {
+  const { data, error } = await sb.rpc('save_wpca_draft', {
+    p_cohort_id:     cohortId,
+    p_assessment_id: assessmentId || null,
+    p_round_name:    roundName || null,
+    p_panels:        panels || []
+  });
+  if (error) throw error;
+  return data;                 // the saved row (includes updated_at)
+}
+
+// Load the draft for a cohort, or null if none has been saved yet.
+async function dbLoadWpcaDraft(cohortId) {
+  const { data, error } = await sb.from('wpca_drafts')
+    .select('cohort_id,assessment_id,round_name,panels,updated_at')
+    .eq('cohort_id', cohortId)
+    .maybeSingle();            // 0 rows -> data is null (not an error)
+  if (error) throw error;
+  return data;
+}
+
+// Remove the draft (e.g. after a successful roll-out, so nothing stale lingers).
+async function dbDeleteWpcaDraft(cohortId) {
+  const { error } = await sb.rpc('delete_wpca_draft', { p_cohort_id: cohortId });
+  if (error) throw error;
+}
+
 // ---------- single-participant edits (roster editor) ----------
 // Add + edit are plain admin RLS writes. Remove goes through the
 // manage-participant Edge Function because deleting the login account
