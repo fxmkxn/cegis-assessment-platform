@@ -81,11 +81,53 @@ function runGenerateCredentials(cohortId, cohortName, mode) {
     .catch((err) => { main.innerHTML = prev; toast('Credential generation failed: ' + err.message, 'err'); });
 }
 
-/* supabase-js forwards the signed-in user's access token automatically,
-   so the Edge Function can identify and authorize the caller. */
+/* Return a NON-expired access token for the current admin, refreshing the
+   session first if needed.
+
+   WHY THIS EXISTS:
+   sb.functions.invoke() attaches whatever access token the session currently
+   holds. Supabase access tokens are short-lived (≈1 hour). supabase-js is
+   supposed to auto-refresh them, but its refresh timer does NOT fire reliably
+   while the browser tab is backgrounded or the laptop is asleep. So if an
+   admin leaves the Cohorts screen open for a while and then clicks "Generate",
+   the very first call can go out carrying an already-expired token — and the
+   Edge Function rejects it with a JWT/"token expired" error.
+
+   Calling getSession() returns the current session and lets supabase-js
+   refresh an expired token; we additionally force a refresh when the token has
+   under 60 seconds left, then hand back a guaranteed-fresh token. */
+async function freshAccessToken() {
+  let session = null;
+  try {
+    const got = await sb.auth.getSession();          // refreshes if already expired
+    session = got && got.data ? got.data.session : null;
+  } catch (_) { /* fall through to refresh attempt */ }
+
+  const now = Math.floor(Date.now() / 1000);          // seconds since epoch
+  const expiresSoon = session && session.expires_at && (session.expires_at - now) < 60;
+
+  if (!session || expiresSoon) {
+    try {
+      const r = await sb.auth.refreshSession();        // force a new access token
+      if (r && r.data && r.data.session) session = r.data.session;
+    } catch (_) { /* leave session as-is; handled by the null check below */ }
+  }
+  return session ? session.access_token : null;
+}
+
+/* supabase-js forwards the signed-in user's access token automatically, but we
+   fetch a fresh one and pass it explicitly so a stale token can't slip through
+   (see freshAccessToken above). */
 async function invokeGenerateCredentials(cohortId, mode) {
+  // Make sure we call the function with a valid, non-expired token.
+  const token = await freshAccessToken();
+  if (!token) {
+    throw new Error('Your session has expired. Please sign in again, then retry.');
+  }
+
   const { data, error } = await sb.functions.invoke('generate-credentials', {
     body: { cohort_id: cohortId, mode: mode, redirect_to: window.location.origin },
+    headers: { Authorization: 'Bearer ' + token },   // override with the fresh token
   });
   if (error) {
     // surface the function's JSON { error } body when present
