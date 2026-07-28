@@ -608,8 +608,12 @@ function wpcaOpenReview(panelId){
   sb.rpc('start_wpca_review', { p_panel_id: panelId }).then(function(res){
     if (res.error) throw res.error;
     WPCA.review.data = res.data;
-    // rehydrate saved answers
-    (res.data.questions||[]).forEach(function(q){ if (q.saved != null) WPCA.review.answers[q.question_id] = q.saved; });
+    // rehydrate saved answers — gate questions store a Yes/Partially/No string
+    // (saved_applied); rating questions store a likert number (saved).
+    (res.data.questions||[]).forEach(function(q){
+      if (q.type === 'gate'){ if (q.saved_applied != null) WPCA.review.answers[q.question_id] = q.saved_applied; }
+      else if (q.saved != null) WPCA.review.answers[q.question_id] = q.saved;
+    });
     WPCA.review.loading = false;
     wpcaRenderReview();
   }).catch(function(err){
@@ -627,14 +631,23 @@ function wpcaRenderReview(){
 
   var d = R.data;
   var qs = d.questions || [];
-  var answered = qs.filter(function(q){ return R.answers[q.question_id] != null; }).length;
-  var pct = qs.length ? Math.round(answered/qs.length*100) : 0;
+  // ---- gate logic ----------------------------------------------------
+  // A 'gate' question ("apply this competency at work" — Yes/Partially/No) sits
+  // before its competency's three ratings. When its answer is "no", those three
+  // ratings are Not Applicable: greyed out and NOT required to submit.
+  function qComp(q){ return (Array.isArray(q.competency) ? q.competency[0] : q.competency) || ''; }
+  var gateByComp = {};
+  qs.forEach(function(q){ if (q.type === 'gate'){ gateByComp[qComp(q)] = R.answers[q.question_id]; } });
+  function isSkipped(q){ return q.type !== 'gate' && gateByComp[qComp(q)] === 'no'; }
+
+  // "Required" = every gate question + every rating whose competency isn't "no".
+  var required = qs.filter(function(q){ return q.type === 'gate' || !isSkipped(q); });
+  var answered = required.filter(function(q){ return R.answers[q.question_id] != null; }).length;
+  var pct = required.length ? Math.round(answered/required.length*100) : 0;
 
   // Role-aware stem ("light way"): each stored prompt is a bare verb phrase
-  // (e.g. "use data or evidence …"), and we prepend WHO is being rated using
-  // the role + subject name that start_wpca_review already returns. Self reads
-  // "…did you …"; every other role reads "…did {name} …". subject_name is
-  // escaped because it's a real person's name.
+  // (e.g. "use data or evidence …"); we prepend WHO is being rated using the
+  // role + subject name start_wpca_review returns. subject_name is escaped.
   var stemWho = (d.rater_role === 'self') ? 'you' : wpcaEsc(d.subject_name || 'this person');
   var stem = 'In the last two weeks, did ' + stemWho + ' ';
 
@@ -642,30 +655,46 @@ function wpcaRenderReview(){
     var comp = Array.isArray(q.competency) ? q.competency.filter(Boolean).join(' · ') : (q.competency||'');
     var chosen = R.answers[q.question_id];
     var saving = R.saving[q.question_id];
-    // Render the ACTUAL uploaded scale labels when the server provides them
-    // (start_wpca_review now returns q.options, lowest-first); fall back to the
-    // generic 5-point scale for older reviews that don't include options yet.
+    var sentence = stem + wpcaEsc(q.prompt) + '?';
+    var head = '<div class="flex jb ac" style="margin-bottom:6px"><span class="tag">Q'+(i+1)+(comp?(' · '+wpcaEsc(comp)):'')+'</span>'+
+      (saving? '<span class="muted small">saving…</span>' : (chosen!=null?'<span class="muted small">saved ✓</span>':''))+'</div>';
+
+    // GATE question — Yes / Partially / No. Answer stored as the lowercased label.
+    if (q.type === 'gate'){
+      var gopts = (Array.isArray(q.options) && q.options.length) ? q.options : ['Yes','Partially','No'];
+      var gbtns = gopts.map(function(lbl){
+        var v = String(lbl).trim().toLowerCase();
+        return '<button class="'+(chosen===v?'sel':'')+'" onclick="wpcaGate(\''+q.question_id+'\',\''+v+'\')">'+wpcaEsc(lbl)+'</button>';
+      }).join('');
+      return '<div class="card pad" style="margin-bottom:12px">'+head+
+        '<p style="margin:0 0 12px;font-weight:600">'+sentence+'</p>'+
+        '<div class="likert">'+gbtns+'</div></div>';
+    }
+
+    // RATING that was gated out ("no") — disabled, not required.
+    if (isSkipped(q)){
+      return '<div class="card pad" style="margin-bottom:12px;opacity:.55">'+head+
+        '<p style="margin:0 0 8px;font-weight:600">'+sentence+'</p>'+
+        '<div class="muted small">Marked “No” for this competency — no rating needed.</div></div>';
+    }
+
+    // RATING — the actual uploaded scale labels (fallback to the 5-point scale).
     var labels = (Array.isArray(q.options) && q.options.length) ? q.options : WPCA_LIKERT;
     var btns = labels.map(function(lbl, idx){
       var val = idx+1;
       return '<button class="'+(chosen===val?'sel':'')+'" onclick="wpcaAnswer(\''+q.question_id+'\','+val+')">'+wpcaEsc(lbl)+'</button>';
     }).join('');
-    // Full sentence = stem + bare prompt + "?". A legacy full-sentence prompt
-    // still reads acceptably with the stem in front.
-    var sentence = stem + wpcaEsc(q.prompt) + '?';
-    return '<div class="card pad" style="margin-bottom:12px">'+
-      '<div class="flex jb ac" style="margin-bottom:6px"><span class="tag">Q'+(i+1)+(comp?(' · '+wpcaEsc(comp)):'')+'</span>'+
-      (saving? '<span class="muted small">saving…</span>' : (chosen!=null?'<span class="muted small">saved ✓</span>':''))+'</div>'+
+    return '<div class="card pad" style="margin-bottom:12px">'+head+
       '<p style="margin:0 0 12px;font-weight:600">'+sentence+'</p>'+
       '<div class="likert">'+btns+'</div></div>';
   }).join('');
 
-  var canSubmit = (answered === qs.length) && qs.length > 0 && !R.submitting;
+  var canSubmit = (answered === required.length) && required.length > 0 && !R.submitting;
   main.innerHTML =
     '<div class="page-head"><div><div class="crumb">My 360 Tasks / Review</div>'+
       '<h1>Reviewing '+wpcaEsc(d.subject_name||'colleague')+'</h1></div>'+
       '<button class="btn ghost" onclick="wpcaCloseReview()">← Back</button></div>'+
-    '<div class="card pad" style="margin-bottom:14px"><div class="flex jb small"><span class="muted">'+wpcaEsc(d.instrument||'WPCA Instrument')+'</span><b>'+answered+'/'+qs.length+'</b></div>'+
+    '<div class="card pad" style="margin-bottom:14px"><div class="flex jb small"><span class="muted">'+wpcaEsc(d.instrument||'WPCA Instrument')+'</span><b>'+answered+'/'+required.length+'</b></div>'+
       '<div class="bar" style="margin:8px 0 0"><i style="width:'+pct+'%"></i></div></div>'+
     blocks+
     '<div class="flex jb ac" style="margin-top:8px"><span class="muted small">Your individual ratings stay confidential — '+wpcaEsc(d.subject_name||'the subject')+' only ever sees pooled, anonymized competency scores.</span>'+
@@ -680,6 +709,36 @@ function wpcaAnswer(qid, val){
 
   R.saving[qid] = true; wpcaRenderReview();
   sb.rpc('save_wpca_response', { p_panel_id: R.panelId, p_question_id: qid, p_likert: val })
+    .then(function(res){
+      R.saving[qid] = false;
+      if (res.error){ if(typeof toast==='function') toast(res.error.message||'Could not save answer','err'); delete R.answers[qid]; }
+      wpcaRenderReview();
+    })
+    .catch(function(err){ R.saving[qid]=false; if(typeof toast==='function') toast((err&&err.message)||'Could not save answer','err'); delete R.answers[qid]; wpcaRenderReview(); });
+}
+
+function wpcaGate(qid, val){
+  var R = WPCA.review; if (!R) return;
+  R.answers[qid] = val;   // val is 'yes' | 'partially' | 'no'
+
+  // Mirror the server: marking "no" clears this competency's ratings (so a
+  // "not applied" competency contributes nothing). Drop them client-side too
+  // to keep the UI in sync.
+  if (val === 'no' && R.data && R.data.questions){
+    var gq = R.data.questions.filter(function(x){ return x.question_id === qid; })[0];
+    var gc = gq && (Array.isArray(gq.competency) ? gq.competency[0] : gq.competency);
+    R.data.questions.forEach(function(x){
+      if (x.type !== 'gate'){
+        var xc = Array.isArray(x.competency) ? x.competency[0] : x.competency;
+        if (xc === gc) delete R.answers[x.question_id];
+      }
+    });
+  }
+
+  if (R.demo){ wpcaRenderReview(); return; }
+
+  R.saving[qid] = true; wpcaRenderReview();
+  sb.rpc('save_wpca_gate', { p_panel_id: R.panelId, p_question_id: qid, p_applied: val })
     .then(function(res){
       R.saving[qid] = false;
       if (res.error){ if(typeof toast==='function') toast(res.error.message||'Could not save answer','err'); delete R.answers[qid]; }
