@@ -217,6 +217,11 @@ function histImport(){
     HIST.busy = false;
     if (res.error){ if (typeof toast==='function') toast(res.error.message||'Import failed','err'); histRender(); return; }
     var d = res.data || {};
+    // The Assessments screen caches the historical-checkpoint list per cohort
+    // (assessments.js → _histListCache). Bust it here so the just-imported
+    // checkpoint appears the moment the admin goes back to the list, rather
+    // than showing a stale cached list. Guarded in case load order changes.
+    if (typeof _histListCache !== 'undefined') _histListCache = { cid:null, list:null };
     if (typeof toast==='function')
       toast((d.participants||0)+' participant(s), '+(d.scores||0)+' score(s) imported'+(d.skipped?(' · '+d.skipped+' skipped'):''),'ok');
     histResult(d);

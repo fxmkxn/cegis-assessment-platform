@@ -255,7 +255,11 @@ function asmtListView(){
   return `<div class="crumb">Manage / Assessments</div>
     <div class="page-head"><h1>Assessments</h1>
       <div class="flex g12 ac">${typeof histBtn==='function'?histBtn():''}<button class="btn" onclick="asmtNew()">＋ New assessment</button></div></div>
-    <div id="asmtListBody"><div class="card pad"><p class="muted small" style="margin:0">Loading…</p></div></div>`;
+    <div id="asmtListBody"><div class="card pad"><p class="muted small" style="margin:0">Loading…</p></div></div>
+    <!-- Historical checkpoints get their OWN little table, rendered just below
+         the assessments table into this second container (filled by
+         loadHistCheckpointList(), which loadAssessmentList() kicks off). -->
+    <div id="histListBody" style="margin-top:18px"></div>`;
 }
 function asmtNew(){
   state.asmt = { kind:'technical', stage:'eoca', name:'', step:0, creating:true };
@@ -300,6 +304,11 @@ function renderAsmtList(list){
 async function loadAssessmentList(force){
   const el = document.getElementById('asmtListBody');
   if (!el) return;                                  // not on the list (wizard mode / other screen)
+  // The historical-checkpoints table lives right below the assessments table.
+  // We drive it from here so it refreshes on the same trigger admin.js already
+  // fires for the assessments list — no extra wiring in admin.js needed. It
+  // self-guards (its own auth/cohort checks + its own #histListBody element).
+  if (typeof loadHistCheckpointList === 'function') loadHistCheckpointList(force);
   const authed = !!(typeof AUTH!=='undefined' && AUTH.session && !AUTH.demo);
   if (!authed){
     el.innerHTML = `<div class="card pad"><div class="flex jb ac"><h3>Assessments in this cohort</h3><span class="badge warn">demo</span></div>
@@ -337,6 +346,127 @@ function asmtDelete(id){
         toast('Assessment deleted', 'ok');
         _asmtListCache = { cid:null, list:null };   // bust cache so the row disappears
         loadAssessmentList(true);
+      }catch(e){ toast('Delete failed: ' + (e.message || e), 'err'); }
+    }
+  });
+}
+
+/* =====================================================================
+ * HISTORICAL CHECKPOINTS — list + delete (Batch C · #2)
+ *
+ * These mirror the assessment-list trio above (renderAsmtList /
+ * loadAssessmentList / asmtDelete) but for the two historical tables:
+ *
+ *   historical_checkpoints        one row per imported checkpoint
+ *                                 (id, cohort_id, stage, label, occurred_on)
+ *   historical_competency_scores  the per-participant numbers, linked by
+ *                                 checkpoint_id
+ *
+ * WHY this can be a pure browser change (no RPC / Edge Function):
+ *   Both tables have an RLS policy of command ALL for an org admin
+ *   (hist_ckpt_admin_all / hist_score_admin_all), so an authenticated admin
+ *   may SELECT and DELETE these rows directly with sb.from(...), exactly like
+ *   loadAssessmentList() already reads the assessments table.
+ *
+ * TWO DIFFERENCES from assessments, both deliberate:
+ *   1. HARD delete. historical_checkpoints has NO deleted_at column, so there
+ *      is no soft-delete/recover. Deleting is permanent — the confirm copy
+ *      says so, and the read below must NOT add .is('deleted_at', null)
+ *      (that column doesn't exist and would error).
+ *   2. We delete in TWO steps from the client — child score rows first, then
+ *      the checkpoint row — so it works whether or not the DB was set up with
+ *      ON DELETE CASCADE. (If a cascade does exist, step 1 is just redundant.)
+ * ===================================================================== */
+
+let _histListCache = { cid:null, list:null };   // same cache pattern as _asmtListCache
+
+/* Build the "Historical checkpoints" card. `list` is the array of rows read
+ * from historical_checkpoints for the active cohort (already newest-first). */
+function renderHistList(list){
+  // Format a date value (occurred_on or created_at) as e.g. "15 Jan"; em-dash if missing.
+  const fmt = d => d ? new Date(d).toLocaleDateString(undefined,{day:'2-digit',month:'short',year:'numeric'}) : '—';
+
+  // Empty state — a compact card so the section stays visible/discoverable even
+  // with nothing imported yet. The import button lives in the page header.
+  if (!list.length){
+    return `<div class="card pad"><div class="flex jb ac"><h3>Historical checkpoints</h3><span class="muted small">0 imported</span></div>
+      <p class="muted small" style="margin:8px 0 0">None yet. Use <b>⤒ Import historical marks</b> above to add pre-platform scores for a past checkpoint.</p></div>`;
+  }
+
+  // One table row per checkpoint. No "Objectives" button (checkpoints have no
+  // questions); just a Delete button wired to histCkptDelete(id).
+  const rows = list.map(c => `<tr>
+    <td><b>${_asmtEsc(c.label)}</b></td>
+    <td><span class="tag">${_asmtEsc((c.stage||'').toUpperCase())}</span></td>
+    <td class="muted small">${fmt(c.occurred_on || c.created_at)}</td>
+    <td style="text-align:right"><button class="btn ghost sm" onclick="histCkptDelete('${c.id}')">Delete</button></td>
+  </tr>`).join('');
+
+  return `<div class="card">
+    <div class="pad" style="border-bottom:1px solid var(--g200)"><div class="flex jb ac"><h3>Historical checkpoints</h3><span class="muted small">${list.length} imported</span></div></div>
+    <div style="overflow:auto"><table><thead><tr><th>Label</th><th>Stage</th><th>Date</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+}
+
+/* Read the checkpoints for the active cohort and paint them into #histListBody.
+ * Called by loadAssessmentList(). Mirrors that function's auth/cohort/cache
+ * guards so the two tables behave the same way. */
+async function loadHistCheckpointList(force){
+  const el = document.getElementById('histListBody');
+  if (!el) return;                                  // not on the list screen — nothing to do
+
+  // Demo mode (no live Supabase): show a short note, matching the assessments card.
+  const authed = !!(typeof AUTH!=='undefined' && AUTH.session && !AUTH.demo);
+  if (!authed){
+    el.innerHTML = `<div class="card pad"><div class="flex jb ac"><h3>Historical checkpoints</h3><span class="badge warn">demo</span></div>
+      <p class="muted small" style="margin:8px 0 0">Connect Supabase to import and manage historical checkpoints.</p></div>`;
+    return;
+  }
+
+  const cid = currentCohortId();
+  if (!cid){ el.innerHTML = ''; return; }           // no cohort picked — the assessments card already prompts to choose one
+
+  // Serve from cache unless forced or the cohort changed (same trick as assessments).
+  if (!force && _histListCache.cid===cid && _histListCache.list){ el.innerHTML = renderHistList(_histListCache.list); return; }
+
+  el.innerHTML = `<div class="card pad"><p class="muted small" style="margin:0">Loading…</p></div>`;
+  try{
+    // NOTE: no .is('deleted_at', null) here — this table has no such column.
+    const { data, error } = await sb.from('historical_checkpoints')
+      .select('id,stage,label,occurred_on,created_at')
+      .eq('cohort_id', cid)
+      .order('created_at', { ascending:false });
+    if (error) throw error;
+    _histListCache = { cid, list: data||[] };
+    el.innerHTML = renderHistList(_histListCache.list);
+  }catch(e){
+    el.innerHTML = `<div class="card pad"><p class="badge err" style="margin:0">Couldn't load historical checkpoints: ${_asmtEsc((e&&e.message)||e)}</p></div>`;
+  }
+}
+
+/* Permanently delete a checkpoint and its per-participant scores. */
+function histCkptDelete(id){
+  const c = (_histListCache.list||[]).find(x=>x.id===id);
+  const label = c ? c.label : 'this checkpoint';
+  showModal({
+    title: 'Delete historical checkpoint?',
+    // Wording says PERMANENT on purpose — unlike assessments, there is no undo.
+    body: `Permanently delete <b>${_asmtEsc(label)}</b> and all of its imported scores? This cannot be undone.`,
+    confirm: 'Delete',
+    onConfirm: async () => {
+      closeModal();
+      try{
+        // Step 1: remove the child score rows for this checkpoint.
+        const { error: e1 } = await sb.from('historical_competency_scores')
+          .delete().eq('checkpoint_id', id);
+        if (e1) throw e1;
+        // Step 2: remove the checkpoint row itself.
+        const { error: e2 } = await sb.from('historical_checkpoints')
+          .delete().eq('id', id);
+        if (e2) throw e2;
+
+        toast('Historical checkpoint deleted', 'ok');
+        _histListCache = { cid:null, list:null };   // bust cache so the row disappears
+        loadHistCheckpointList(true);
       }catch(e){ toast('Delete failed: ' + (e.message || e), 'err'); }
     }
   });
