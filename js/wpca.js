@@ -157,28 +157,15 @@ function buildPanels(roster, subjects){
   var byLoad = function(a,b){ return (load[a.id]||0) - (load[b.id]||0); };
 
   // Pass 1 — managers are fixed by the hierarchy; tally their load up front.
-  // We ALSO attach each subject's direct reports as UPWARD ("managee") raters:
-  // everyone whose manager IS this subject rates this subject. That is the 4th
-  // rater direction (self / manager / peer / managee). `reportees` is a LIST
-  // (a subject can have several reports); the old singular `reportee` slot is
-  // kept as null purely for backward-compatibility with any older reader.
   subjects.forEach(function(s){
     var mgr = (s.mgr && roster.some(function(x){return x.id===s.mgr;})) ? s.mgr : null;
-    var reportees = roster
-      .filter(function(r){ return r.mgr === s.id; })   // people who report to s
-      .map(function(r){ return r.id; });
-    panels[s.id] = { mgr: mgr, reportee: null, reportees: reportees, peers: [] };
+    panels[s.id] = { mgr: mgr, reportee: null, peers: [] };
     inc(mgr);
-    reportees.forEach(inc);                            // each report now owes 1 upward review
   });
 
   // Pass 2 — peers: enforce the city rule, break ties by lowest load.
   subjects.forEach(function(s){
-    // A subject's own reports rate them UPWARD (as reportees), so they must not
-    // also be picked as peers of the same subject — that would create a duplicate
-    // (round, subject, rater) row and the roll-out RPC rejects duplicates.
     var exclude = {}; [s.id, s.mgr].filter(Boolean).forEach(function(x){ exclude[x]=true; });
-    (panels[s.id].reportees||[]).forEach(function(x){ exclude[x]=true; });
     var pool = roster.filter(function(r){ return !exclude[r.id]; });
     var sameCity = pool.filter(function(r){ return r.loc && s.loc && r.loc === s.loc; }).sort(byLoad);
     var diffCity = pool.filter(function(r){ return !(r.loc && s.loc && r.loc === s.loc); }).sort(byLoad);
@@ -216,7 +203,6 @@ function workloadCount(pid){
     var p = set.panels[s.id]; if (!p) return;
     if (p.mgr === pid) c++;
     if (p.peers && p.peers.indexOf(pid) !== -1) c++;
-    if (p.reportees && p.reportees.indexOf(pid) !== -1) c++;   // upward review of one's manager
   });
   return c;
 }
@@ -245,15 +231,11 @@ function vWPCA(){
     var peerChips = (p.peers||[]).map(function(pid, idx){ return wpcaRaterChip(pid, s, 'peer', s.id, idx); }).join('') || '<span class="muted small">—</span>';
     var mgrChip = p.mgr ? wpcaRaterChip(p.mgr, s, 'mgr', s.id)
       : (set.hier ? '<span class="badge warn">⚠ no manager</span>' : '<span class="tag">n/a</span>');
-    // upward raters: this subject's direct reports (empty for individual contributors)
-    var repChips = (p.reportees||[]).map(function(pid){ return wpcaRaterChip(pid, s, 'reportee', s.id); }).join('') || '<span class="muted small">—</span>';
-    // "incomplete" is unchanged: reportees are OPTIONAL (not everyone manages people),
-    // so a panel is still complete on self + manager + 3 peers.
     var incomplete = ((p.peers||[]).length < 3) || (set.hier && !p.mgr);
     return '<tr><td><b>'+wpcaEsc(s.n)+'</b><div class="muted small">'+wpcaEsc(wpcaMeta(s))+'</div>'+
       (incomplete ? '<span class="badge warn" style="margin-top:4px">⚠ incomplete panel</span>' : '')+'</td>'+
       '<td><span class="chip"><span class="av">Self</span></span></td>'+
-      '<td>'+mgrChip+'</td><td>'+peerChips+'</td><td>'+repChips+'</td></tr>';
+      '<td>'+mgrChip+'</td><td>'+peerChips+'</td></tr>';
   }).join('');
 
   var roundSel = '<select id="wpcaRound" class="btn ghost sm" style="appearance:auto">'+
@@ -276,7 +258,7 @@ function vWPCA(){
       '<div class="pad" style="border-bottom:1px solid var(--g200)"><div class="flex jb ac wrap">'+
         '<h3>Peer matrix · '+set.subjects.length+' subjects</h3>'+
         '<span class="muted small">Click any peer chip to swap · 📍 same location · ⇄ cross-workstream</span></div></div>'+
-      '<div style="overflow:auto"><table><thead><tr><th>Subject</th><th>Self</th><th>Manager</th><th>Peers (×3)</th><th>Reports (upward)</th></tr></thead>'+
+      '<div style="overflow:auto"><table><thead><tr><th>Subject</th><th>Self</th><th>Manager</th><th>Peers (×3)</th></tr></thead>'+
       '<tbody>'+rows+'</tbody></table></div>'+
     '</div></div>';
 }
@@ -350,27 +332,41 @@ function reassign(){
   }, 700);
 }
 
-/* Peer-swap modal — candidates ranked by current review load. */
+/* Peer-swap modal — shows EVERY eligible rater, sorted lowest-load -> highest.
+   (Previously this was capped at the 8 lowest-load people via cands.slice(0,8);
+   now we render the full list inside a scrollable box.) */
 function openSwap(subId, peerIdx){
   var set = wpcaSet();
-  var sub = wpcaFind(subId); if (!sub) return;
-  var panel = set.panels[subId]; if (!panel) return;
-  var current = panel.peers[peerIdx];
-  var used = {}; [subId, panel.mgr].concat(panel.peers||[]).filter(Boolean).forEach(function(x){ used[x]=true; });
+  var sub = wpcaFind(subId); if (!sub) return;          // the subject being reviewed
+  var panel = set.panels[subId]; if (!panel) return;    // that subject's current panel
+  var current = panel.peers[peerIdx];                   // the peer we're about to replace
+
+  // Mark everyone already on this panel (subject, manager, the 3 peers) as "used"
+  // so we don't offer them again -- EXCEPT the current peer, who is allowed to stay.
+  var used = {};
+  [subId, panel.mgr].concat(panel.peers||[]).filter(Boolean).forEach(function(x){ used[x]=true; });
+
+  // Candidate list: everyone eligible, minus the already-used people,
+  // sorted ASCENDING by current review load (fewest reviews first).
   var cands = wpcaEligiblePeers(sub)
     .filter(function(r){ return !used[r.id] || r.id===current; })
     .sort(function(a,b){ return workloadCount(a.id)-workloadCount(b.id); });
-  var opts = cands.slice(0,8).map(function(r){
+
+  // Render EVERY candidate (no .slice cap anymore) as a clickable row.
+  var opts = cands.map(function(r){
     var load = workloadCount(r.id);
-    var badge = load>6 ? 'err' : (load<2 ? 'info' : 'ok');
+    var badge = load>6 ? 'err' : (load<2 ? 'info' : 'ok');   // colour the load pill
     return '<div class="flex ac jb" style="padding:9px 10px;border:1px solid var(--g200);border-radius:9px;margin-bottom:7px;cursor:pointer'+(r.id===current?';background:var(--indigo-l)':'')+'" onclick="doSwap(\''+subId+'\','+peerIdx+',\''+r.id+'\')">'+
       '<div class="flex ac g8"><span class="av" style="width:28px;height:28px;border-radius:50%;background:var(--teal);color:#fff;display:grid;place-items:center;font-size:10px;font-weight:700">'+wpcaInitials(r.n)+'</span>'+
       '<div><b>'+wpcaEsc(r.n)+'</b><div class="muted small">'+wpcaEsc(wpcaMeta(r))+'</div></div></div>'+
       '<span class="badge '+badge+'">load '+load+'</span></div>';
   }).join('') || '<div class="muted small">No other eligible raters available.</div>';
+
+  // The full roster can be long, so wrap the rows in a scrollable box.
   if (typeof showModal === 'function') showModal({
     title:'Swap a peer for '+wpcaEsc(sub.n.split(/\s+/)[0]),
-    body:'<div class="muted small" style="margin-bottom:10px">Candidates ranked by current review load. Swapping recomputes the workload graph live.</div>'+opts,
+    body:'<div class="muted small" style="margin-bottom:10px">'+cands.length+' eligible raters, sorted from lowest review load to highest. Swapping recomputes the workload graph live.</div>'+
+         '<div style="max-height:360px;overflow:auto;padding-right:2px">'+opts+'</div>',
     confirm:null, onConfirm:null
   });
 }
@@ -387,8 +383,7 @@ function doSwap(subId, peerIdx, newId){
 function approveWPCA(){
   var set = wpcaSet();
   var total = 0;
-  // invitations per subject = self + manager + peers + upward reports
-  set.subjects.forEach(function(s){ var p=set.panels[s.id]||{peers:[]}; total += 1 + (p.mgr?1:0) + (p.peers||[]).length + (p.reportees||[]).length; });
+  set.subjects.forEach(function(s){ var p=set.panels[s.id]||{peers:[]}; total += 1 + (p.mgr?1:0) + (p.peers||[]).length; });
   var roundName = (document.getElementById('wpcaRound') || {}).value || 'Week 2';
 
   if (typeof showModal === 'function') showModal({
@@ -403,7 +398,7 @@ function wpcaDoRollout(roundName){
   if (typeof closeModal==='function') closeModal();
   var set = wpcaSet();
   var total = 0;
-  set.subjects.forEach(function(s){ var p=set.panels[s.id]||{peers:[]}; total += 1 + (p.mgr?1:0) + (p.peers||[]).length + (p.reportees||[]).length; });
+  set.subjects.forEach(function(s){ var p=set.panels[s.id]||{peers:[]}; total += 1 + (p.mgr?1:0) + (p.peers||[]).length; });
 
   if (!wpcaLive()){
     if (typeof toast==='function') toast('WPCA '+roundName+' rolled out · '+total+' invitations sent','ok');
@@ -412,20 +407,10 @@ function wpcaDoRollout(roundName){
   }
 
   // LIVE: build the panels payload and call the atomic roll-out RPC.
-  // `reportees` carries the upward raters. NOTE: the roll_out_wpca_round DB
-  // function must be updated to READ this key and create the matching upward
-  // wpca_panels rows (see the migration note that ships with this change).
-  // Until then the extra key is simply ignored by Postgres, so sending it is
-  // safe and changes nothing in the current live behaviour.
+  // reportee is intentionally null — panels are self + manager + 3 peers.
   var payload = set.subjects.map(function(s){
     var p = set.panels[s.id] || { peers:[] };
-    return {
-      subject:   s.id,
-      manager:   p.mgr || null,
-      reportee:  null,                                  // legacy slot, kept for compatibility
-      reportees: (p.reportees || []).filter(Boolean),   // NEW: upward / managee raters
-      peers:     (p.peers || []).filter(Boolean)
-    };
+    return { subject:s.id, manager:p.mgr||null, reportee:null, peers:(p.peers||[]).filter(Boolean) };
   });
 
   if (typeof mountOctopus==='function'){ var m=document.querySelector('.main'); if(m) mountOctopus(m,'Rolling out the 360 and sending invitations…'); }
@@ -608,12 +593,8 @@ function wpcaOpenReview(panelId){
   sb.rpc('start_wpca_review', { p_panel_id: panelId }).then(function(res){
     if (res.error) throw res.error;
     WPCA.review.data = res.data;
-    // rehydrate saved answers — gate questions store a Yes/Partially/No string
-    // (saved_applied); rating questions store a likert number (saved).
-    (res.data.questions||[]).forEach(function(q){
-      if (q.type === 'gate'){ if (q.saved_applied != null) WPCA.review.answers[q.question_id] = q.saved_applied; }
-      else if (q.saved != null) WPCA.review.answers[q.question_id] = q.saved;
-    });
+    // rehydrate saved answers
+    (res.data.questions||[]).forEach(function(q){ if (q.saved != null) WPCA.review.answers[q.question_id] = q.saved; });
     WPCA.review.loading = false;
     wpcaRenderReview();
   }).catch(function(err){
@@ -631,70 +612,30 @@ function wpcaRenderReview(){
 
   var d = R.data;
   var qs = d.questions || [];
-  // ---- gate logic ----------------------------------------------------
-  // A 'gate' question ("apply this competency at work" — Yes/Partially/No) sits
-  // before its competency's three ratings. When its answer is "no", those three
-  // ratings are Not Applicable: greyed out and NOT required to submit.
-  function qComp(q){ return (Array.isArray(q.competency) ? q.competency[0] : q.competency) || ''; }
-  var gateByComp = {};
-  qs.forEach(function(q){ if (q.type === 'gate'){ gateByComp[qComp(q)] = R.answers[q.question_id]; } });
-  function isSkipped(q){ return q.type !== 'gate' && gateByComp[qComp(q)] === 'no'; }
-
-  // "Required" = every gate question + every rating whose competency isn't "no".
-  var required = qs.filter(function(q){ return q.type === 'gate' || !isSkipped(q); });
-  var answered = required.filter(function(q){ return R.answers[q.question_id] != null; }).length;
-  var pct = required.length ? Math.round(answered/required.length*100) : 0;
-
-  // Role-aware stem ("light way"): each stored prompt is a bare verb phrase
-  // (e.g. "use data or evidence …"); we prepend WHO is being rated using the
-  // role + subject name start_wpca_review returns. subject_name is escaped.
-  var stemWho = (d.rater_role === 'self') ? 'you' : wpcaEsc(d.subject_name || 'this person');
-  var stem = 'In the last two weeks, did ' + stemWho + ' ';
+  var answered = qs.filter(function(q){ return R.answers[q.question_id] != null; }).length;
+  var pct = qs.length ? Math.round(answered/qs.length*100) : 0;
 
   var blocks = qs.map(function(q, i){
     var comp = Array.isArray(q.competency) ? q.competency.filter(Boolean).join(' · ') : (q.competency||'');
     var chosen = R.answers[q.question_id];
     var saving = R.saving[q.question_id];
-    var sentence = stem + wpcaEsc(q.prompt) + '?';
-    var head = '<div class="flex jb ac" style="margin-bottom:6px"><span class="tag">Q'+(i+1)+(comp?(' · '+wpcaEsc(comp)):'')+'</span>'+
-      (saving? '<span class="muted small">saving…</span>' : (chosen!=null?'<span class="muted small">saved ✓</span>':''))+'</div>';
-
-    // GATE question — Yes / Partially / No. Answer stored as the lowercased label.
-    if (q.type === 'gate'){
-      var gopts = (Array.isArray(q.options) && q.options.length) ? q.options : ['Yes','Partially','No'];
-      var gbtns = gopts.map(function(lbl){
-        var v = String(lbl).trim().toLowerCase();
-        return '<button class="'+(chosen===v?'sel':'')+'" onclick="wpcaGate(\''+q.question_id+'\',\''+v+'\')">'+wpcaEsc(lbl)+'</button>';
-      }).join('');
-      return '<div class="card pad" style="margin-bottom:12px">'+head+
-        '<p style="margin:0 0 12px;font-weight:600">'+sentence+'</p>'+
-        '<div class="likert">'+gbtns+'</div></div>';
-    }
-
-    // RATING that was gated out ("no") — disabled, not required.
-    if (isSkipped(q)){
-      return '<div class="card pad" style="margin-bottom:12px;opacity:.55">'+head+
-        '<p style="margin:0 0 8px;font-weight:600">'+sentence+'</p>'+
-        '<div class="muted small">Marked “No” for this competency — no rating needed.</div></div>';
-    }
-
-    // RATING — the actual uploaded scale labels (fallback to the 5-point scale).
-    var labels = (Array.isArray(q.options) && q.options.length) ? q.options : WPCA_LIKERT;
-    var btns = labels.map(function(lbl, idx){
+    var btns = WPCA_LIKERT.map(function(lbl, idx){
       var val = idx+1;
-      return '<button class="'+(chosen===val?'sel':'')+'" onclick="wpcaAnswer(\''+q.question_id+'\','+val+')">'+wpcaEsc(lbl)+'</button>';
+      return '<button class="'+(chosen===val?'sel':'')+'" onclick="wpcaAnswer(\''+q.question_id+'\','+val+')">'+lbl+'</button>';
     }).join('');
-    return '<div class="card pad" style="margin-bottom:12px">'+head+
-      '<p style="margin:0 0 12px;font-weight:600">'+sentence+'</p>'+
+    return '<div class="card pad" style="margin-bottom:12px">'+
+      '<div class="flex jb ac" style="margin-bottom:6px"><span class="tag">Q'+(i+1)+(comp?(' · '+wpcaEsc(comp)):'')+'</span>'+
+      (saving? '<span class="muted small">saving…</span>' : (chosen!=null?'<span class="muted small">saved ✓</span>':''))+'</div>'+
+      '<p style="margin:0 0 12px;font-weight:600">'+wpcaEsc(q.prompt)+'</p>'+
       '<div class="likert">'+btns+'</div></div>';
   }).join('');
 
-  var canSubmit = (answered === required.length) && required.length > 0 && !R.submitting;
+  var canSubmit = (answered === qs.length) && qs.length > 0 && !R.submitting;
   main.innerHTML =
     '<div class="page-head"><div><div class="crumb">My 360 Tasks / Review</div>'+
       '<h1>Reviewing '+wpcaEsc(d.subject_name||'colleague')+'</h1></div>'+
       '<button class="btn ghost" onclick="wpcaCloseReview()">← Back</button></div>'+
-    '<div class="card pad" style="margin-bottom:14px"><div class="flex jb small"><span class="muted">'+wpcaEsc(d.instrument||'WPCA Instrument')+'</span><b>'+answered+'/'+required.length+'</b></div>'+
+    '<div class="card pad" style="margin-bottom:14px"><div class="flex jb small"><span class="muted">'+wpcaEsc(d.instrument||'WPCA Instrument')+'</span><b>'+answered+'/'+qs.length+'</b></div>'+
       '<div class="bar" style="margin:8px 0 0"><i style="width:'+pct+'%"></i></div></div>'+
     blocks+
     '<div class="flex jb ac" style="margin-top:8px"><span class="muted small">Your individual ratings stay confidential — '+wpcaEsc(d.subject_name||'the subject')+' only ever sees pooled, anonymized competency scores.</span>'+
@@ -709,36 +650,6 @@ function wpcaAnswer(qid, val){
 
   R.saving[qid] = true; wpcaRenderReview();
   sb.rpc('save_wpca_response', { p_panel_id: R.panelId, p_question_id: qid, p_likert: val })
-    .then(function(res){
-      R.saving[qid] = false;
-      if (res.error){ if(typeof toast==='function') toast(res.error.message||'Could not save answer','err'); delete R.answers[qid]; }
-      wpcaRenderReview();
-    })
-    .catch(function(err){ R.saving[qid]=false; if(typeof toast==='function') toast((err&&err.message)||'Could not save answer','err'); delete R.answers[qid]; wpcaRenderReview(); });
-}
-
-function wpcaGate(qid, val){
-  var R = WPCA.review; if (!R) return;
-  R.answers[qid] = val;   // val is 'yes' | 'partially' | 'no'
-
-  // Mirror the server: marking "no" clears this competency's ratings (so a
-  // "not applied" competency contributes nothing). Drop them client-side too
-  // to keep the UI in sync.
-  if (val === 'no' && R.data && R.data.questions){
-    var gq = R.data.questions.filter(function(x){ return x.question_id === qid; })[0];
-    var gc = gq && (Array.isArray(gq.competency) ? gq.competency[0] : gq.competency);
-    R.data.questions.forEach(function(x){
-      if (x.type !== 'gate'){
-        var xc = Array.isArray(x.competency) ? x.competency[0] : x.competency;
-        if (xc === gc) delete R.answers[x.question_id];
-      }
-    });
-  }
-
-  if (R.demo){ wpcaRenderReview(); return; }
-
-  R.saving[qid] = true; wpcaRenderReview();
-  sb.rpc('save_wpca_gate', { p_panel_id: R.panelId, p_question_id: qid, p_applied: val })
     .then(function(res){
       R.saving[qid] = false;
       if (res.error){ if(typeof toast==='function') toast(res.error.message||'Could not save answer','err'); delete R.answers[qid]; }
