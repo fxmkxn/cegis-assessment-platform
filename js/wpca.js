@@ -701,24 +701,34 @@ function wpcaSubjectLabel(o){
    the admin "Participant preview" (assessments.js) and the participant player
    below, so the two can never drift apart. It mirrors the preview exactly:
 
-       In the last two weeks, did [name] <stem>?
+       In the last two weeks, did <name> <stem>?
 
-   - lead-in "In the last two weeks, did [name] " and the trailing "?" are
-     rendered muted (grey), matching the preview.
-   - [name] is kept as a LITERAL placeholder, exactly as the preview shows it
-     (the preview never fills it in). If you'd prefer the actual person's name,
-     that's a small change — see the note in the handover.
+   - the lead-in and the trailing "?" are rendered muted (grey).
+   - <name>: the admin preview has no subject, so it shows the literal
+     placeholder "[name]". The participant player DOES know who is being
+     reviewed and passes that name in, so reviewers see the real person
+     (e.g. "...did Nabajit apply this competency at work?").
    - <stem> is the instrument's question text, rendered with the same
      **bold** / *italic* / line-break markdown the preview uses.
 
-   `stemId` is optional: the admin editor passes an element id so it can live-
-   update just the stem as the author types; the player passes nothing. */
-function wpca360PromptHtml(prompt, stemId){
+   Args:
+     prompt  - the raw question stem.
+     stemId  - optional element id; the admin editor passes one so it can
+               live-update just the stem as the author types. Player omits it.
+     subject - optional subject name; when given (player), it replaces the
+               "[name]" placeholder. When omitted (preview), "[name]" stays. */
+function wpca360PromptHtml(prompt, stemId, subject){
   var idAttr = stemId ? ' id="' + stemId + '"' : '';
+
+  var who = (subject != null && String(subject).trim() !== '')
+    ? ((typeof wpcaEsc === 'function') ? wpcaEsc(String(subject).trim()) : String(subject).trim())
+    : '[name]';
+
   var stem = (typeof mdToSafeHtml === 'function')
     ? mdToSafeHtml(prompt)
     : (typeof wpcaEsc === 'function' ? wpcaEsc(prompt || '') : String(prompt == null ? '' : prompt));
-  return '<span class="muted">In the last two weeks, did [name] </span>' +
+
+  return '<span class="muted">In the last two weeks, did ' + who + ' </span>' +
          '<span' + idAttr + '>' + (stem || '<span class="muted">(empty)</span>') + '</span>' +
          '<span class="muted">?</span>';
 }
@@ -748,7 +758,7 @@ function wpcaRenderReview(){
     return '<div class="card pad" style="margin-bottom:12px">'+
       '<div class="flex jb ac" style="margin-bottom:6px"><span class="tag">Q'+(i+1)+(comp?(' · '+wpcaEsc(comp)):'')+'</span>'+
       (saving? '<span class="muted small">saving…</span>' : (chosen!=null?'<span class="muted small">saved ✓</span>':''))+'</div>'+
-      '<p style="margin:0 0 12px;font-weight:600;line-height:1.5">'+wpca360PromptHtml(q.prompt)+'</p>'+
+      '<p style="margin:0 0 12px;font-weight:600;line-height:1.5">'+wpca360PromptHtml(q.prompt, null, wpcaSubjectLabel(d))+'</p>'+
       '<div class="likert">'+btns+'</div></div>';
   }).join('');
 
