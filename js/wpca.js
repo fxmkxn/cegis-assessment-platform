@@ -631,26 +631,60 @@ function wpcaOpenReview(panelId){
 
 /* ------------------------------------------------------------------
    Per-question options for the 360 player.
-   The uploaded WPCA instrument carries its OWN options (opt1..opt5 in
-   the template), which start_wpca_review() returns as
-   q.options = [{ordinal, label}, ...] -- exactly the shape the regular
-   assessment player (player.js) uses. We must render THOSE options, not
-   a hardcoded scale. WPCA_LIKERT is only a fallback for demo mode or an
-   instrument that shipped without options.
+
+   The uploaded WPCA instrument carries its OWN options. Depending on how
+   start_wpca_review() shapes them, a question can arrive as ANY of:
+     - q.options = ["Never","Rarely",...]                (array of strings)
+     - q.options = [{ordinal,label}] / [{text}] / ...    (array of objects)
+     - q.opt1 .. q.optN on the question itself           (mirrors the CSV template)
+   The earlier version only understood {ordinal,label} and returned an EMPTY
+   list for anything else -- which is why the survey rendered prompts with no
+   answer buttons. We now normalise all of the above and, only if nothing
+   usable is found, fall back to the built-in 5-point scale so the question is
+   never left un-answerable.
    ------------------------------------------------------------------ */
-function wpcaQuestionOptions(q){
-  var opts = q && q.options;
-  if (Array.isArray(opts) && opts.length){
-    return opts
-      // keep only options that actually have a label (a blank opt5 is skipped)
-      .filter(function(o){ return o && o.label != null && String(o.label).trim() !== ''; })
-      .map(function(o, i){
-        // use the option's own ordinal when present, else its position (1-based)
-        return { ordinal: (o.ordinal != null ? o.ordinal : i+1), label: String(o.label) };
-      });
-  }
-  // fallback: the built-in 5-point Likert (demo / options-less instruments)
+function wpcaLikertFallback(){
   return WPCA_LIKERT.map(function(lbl, i){ return { ordinal: i+1, label: lbl }; });
+}
+function wpcaQuestionOptions(q){
+  if (!q) return wpcaLikertFallback();
+
+  // ---- shape 1: q.options is an array (of strings or objects) ----
+  var raw = q.options;
+  if (Array.isArray(raw) && raw.length){
+    var out = [];
+    raw.forEach(function(o, i){
+      if (o == null) return;
+      var label, ordinal = i + 1;
+      if (typeof o === 'string' || typeof o === 'number'){
+        label = String(o);                                  // plain string option
+      } else if (typeof o === 'object'){
+        // accept whichever label-ish key the RPC used
+        label = (o.label != null) ? o.label
+              : (o.text  != null) ? o.text
+              : (o.name  != null) ? o.name
+              : (o.option!= null) ? o.option
+              : (o.caption!=null) ? o.caption
+              : (o.value != null) ? o.value : null;
+        if (o.ordinal != null) ordinal = o.ordinal;         // keep the real ordinal
+      }
+      if (label != null && String(label).trim() !== ''){
+        out.push({ ordinal: ordinal, label: String(label).trim() });
+      }
+    });
+    if (out.length) return out;                             // real options found
+  }
+
+  // ---- shape 2: opt1..optN fields sitting directly on the question ----
+  var flat = [];
+  for (var n = 1; n <= 8; n++){
+    var v = q['opt' + n];
+    if (v != null && String(v).trim() !== '') flat.push({ ordinal: n, label: String(v).trim() });
+  }
+  if (flat.length) return flat;
+
+  // ---- fallback: built-in 5-point scale (demo / options-less instruments) ----
+  return wpcaLikertFallback();
 }
 
 /* The subject's display name may arrive under different keys depending on
