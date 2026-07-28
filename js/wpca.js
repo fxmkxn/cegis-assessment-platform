@@ -697,6 +697,35 @@ function wpcaSubjectLabel(o){
   return o.subject_name || o.subjectName || o.subject || o.name || '';
 }
 
+/* Build the question text actually shown to the reviewer.
+
+   The instrument stores each item's stem verbatim (the CSV "ques" column),
+   and some stems contain placeholders that must be filled in at display time:
+     - "this competency"  -> the question's own competency name
+                             (e.g. "apply this competency at work"
+                                 -> "apply Data-led Decision Making at work")
+     - {name}/{{name}}/[name]/{subject}  -> the person being reviewed
+                             (only if the instrument uses such a token; if not,
+                              nothing changes)
+   Without this, the reviewer only sees the raw stem. */
+function wpcaQuestionPrompt(q, subjectName){
+  var prompt = (q && q.prompt != null) ? String(q.prompt) : '';
+  var comp = Array.isArray(q.competency)
+    ? q.competency.filter(Boolean).join(' / ')
+    : (q.competency || '');
+
+  // 1) "this competency" -> the actual competency name
+  if (comp) prompt = prompt.replace(/\bthis competency\b/gi, comp);
+
+  // 2) name-style tokens -> the subject (harmless no-op when absent)
+  if (subjectName) {
+    prompt = prompt
+      .replace(/\{\{?\s*(name|subject|subject_name)\s*\}?\}/gi, subjectName)
+      .replace(/\[\s*(name|subject|subject_name)\s*\]/gi, subjectName);
+  }
+  return prompt;
+}
+
 function wpcaRenderReview(){
   var main = document.querySelector('.main'); if (!main) return;
   var R = WPCA.review; if (!R){ return; }
@@ -722,7 +751,7 @@ function wpcaRenderReview(){
     return '<div class="card pad" style="margin-bottom:12px">'+
       '<div class="flex jb ac" style="margin-bottom:6px"><span class="tag">Q'+(i+1)+(comp?(' · '+wpcaEsc(comp)):'')+'</span>'+
       (saving? '<span class="muted small">saving…</span>' : (chosen!=null?'<span class="muted small">saved ✓</span>':''))+'</div>'+
-      '<p style="margin:0 0 12px;font-weight:600">'+wpcaEsc(q.prompt)+'</p>'+
+      '<p style="margin:0 0 12px;font-weight:600">'+wpcaEsc(wpcaQuestionPrompt(q, wpcaSubjectLabel(d)))+'</p>'+
       '<div class="likert">'+btns+'</div></div>';
   }).join('');
 
