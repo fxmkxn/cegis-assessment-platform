@@ -547,10 +547,11 @@ function wpcaRoleLabel(role){
 }
 
 function wpcaTaskRowLive(t){
-  var initialsName = wpcaInitials(t.subject_name || '?');
+  var subjName = wpcaSubjectLabel(t);                    // accept subject_name or aliases
+  var initialsName = wpcaInitials(subjName || '?');
   var pct = t.total_q ? Math.round((t.answered_q/t.total_q)*100) : 0;
   var done = t.status === 'complete';
-  var sub = (t.rater_role==='self') ? 'Yourself' : wpcaEsc(t.subject_name);
+  var sub = (t.rater_role==='self') ? 'Yourself' : wpcaEsc(subjName || 'colleague');
   var btn = done
     ? '<span class="badge ok">✓ submitted</span>'
     : '<button class="btn ghost sm" onclick="wpcaOpenReview(\''+t.panel_id+'\')">'+(t.answered_q? 'Continue →':'Start review →')+'</button>';
@@ -628,6 +629,40 @@ function wpcaOpenReview(panelId){
   });
 }
 
+/* ------------------------------------------------------------------
+   Per-question options for the 360 player.
+   The uploaded WPCA instrument carries its OWN options (opt1..opt5 in
+   the template), which start_wpca_review() returns as
+   q.options = [{ordinal, label}, ...] -- exactly the shape the regular
+   assessment player (player.js) uses. We must render THOSE options, not
+   a hardcoded scale. WPCA_LIKERT is only a fallback for demo mode or an
+   instrument that shipped without options.
+   ------------------------------------------------------------------ */
+function wpcaQuestionOptions(q){
+  var opts = q && q.options;
+  if (Array.isArray(opts) && opts.length){
+    return opts
+      // keep only options that actually have a label (a blank opt5 is skipped)
+      .filter(function(o){ return o && o.label != null && String(o.label).trim() !== ''; })
+      .map(function(o, i){
+        // use the option's own ordinal when present, else its position (1-based)
+        return { ordinal: (o.ordinal != null ? o.ordinal : i+1), label: String(o.label) };
+      });
+  }
+  // fallback: the built-in 5-point Likert (demo / options-less instruments)
+  return WPCA_LIKERT.map(function(lbl, i){ return { ordinal: i+1, label: lbl }; });
+}
+
+/* The subject's display name may arrive under different keys depending on
+   the RPC. subject_name is expected, but we accept a few aliases so a
+   backend field rename doesn't blank out every name in the participant UI.
+   NOTE: this can only surface a name the server actually sent -- if the RPC
+   returns no name at all, that's a data/backend issue, not a client one. */
+function wpcaSubjectLabel(o){
+  if (!o) return '';
+  return o.subject_name || o.subjectName || o.subject || o.name || '';
+}
+
 function wpcaRenderReview(){
   var main = document.querySelector('.main'); if (!main) return;
   var R = WPCA.review; if (!R){ return; }
@@ -644,9 +679,11 @@ function wpcaRenderReview(){
     var comp = Array.isArray(q.competency) ? q.competency.filter(Boolean).join(' · ') : (q.competency||'');
     var chosen = R.answers[q.question_id];
     var saving = R.saving[q.question_id];
-    var btns = WPCA_LIKERT.map(function(lbl, idx){
-      var val = idx+1;
-      return '<button class="'+(chosen===val?'sel':'')+'" onclick="wpcaAnswer(\''+q.question_id+'\','+val+')">'+lbl+'</button>';
+    // Render THIS question's own options (falls back to the 5-point scale in demo).
+    // The button's value is the option ordinal, so wpcaAnswer/save_wpca_response
+    // receive the correct choice for whatever scale the instrument uses.
+    var btns = wpcaQuestionOptions(q).map(function(o){
+      return '<button class="'+(chosen===o.ordinal?'sel':'')+'" onclick="wpcaAnswer(\''+q.question_id+'\','+o.ordinal+')">'+wpcaEsc(o.label)+'</button>';
     }).join('');
     return '<div class="card pad" style="margin-bottom:12px">'+
       '<div class="flex jb ac" style="margin-bottom:6px"><span class="tag">Q'+(i+1)+(comp?(' · '+wpcaEsc(comp)):'')+'</span>'+
@@ -658,12 +695,12 @@ function wpcaRenderReview(){
   var canSubmit = (answered === qs.length) && qs.length > 0 && !R.submitting;
   main.innerHTML =
     '<div class="page-head"><div><div class="crumb">My 360 Tasks / Review</div>'+
-      '<h1>Reviewing '+wpcaEsc(d.subject_name||'colleague')+'</h1></div>'+
+      '<h1>Reviewing '+wpcaEsc(wpcaSubjectLabel(d)||'colleague')+'</h1></div>'+
       '<button class="btn ghost" onclick="wpcaCloseReview()">← Back</button></div>'+
     '<div class="card pad" style="margin-bottom:14px"><div class="flex jb small"><span class="muted">'+wpcaEsc(d.instrument||'WPCA Instrument')+'</span><b>'+answered+'/'+qs.length+'</b></div>'+
       '<div class="bar" style="margin:8px 0 0"><i style="width:'+pct+'%"></i></div></div>'+
     blocks+
-    '<div class="flex jb ac" style="margin-top:8px"><span class="muted small">Your individual ratings stay confidential — '+wpcaEsc(d.subject_name||'the subject')+' only ever sees pooled, anonymized competency scores.</span>'+
+    '<div class="flex jb ac" style="margin-top:8px"><span class="muted small">Your individual ratings stay confidential — '+wpcaEsc(wpcaSubjectLabel(d)||'the subject')+' only ever sees pooled, anonymized competency scores.</span>'+
     '<button class="btn" '+(canSubmit?'':'disabled')+' onclick="wpcaSubmitReview()">'+(R.submitting?'Submitting…':'Submit review')+'</button></div>';
 }
 
