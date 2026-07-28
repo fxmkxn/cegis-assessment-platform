@@ -39,8 +39,9 @@ const ASMT_FORMATS = {
   wpca: {
     label: 'WPCA · 360 (rating scale)',
     stages: ['wpca'],
-    // opt1..opt5 hold the scale LABELS — any ordered words, not just Likert agreement
-    headers: ['qno','competency','ques','opt1','opt2','opt3','opt4','opt5'],
+    // opt1..opt5 hold the scale LABELS — any ordered words, not just Likert agreement.
+    // qtype marks a row as 'gate' (Yes/Partially/No) or 'likert'; blank = likert.
+    headers: ['qno','competency','qtype','ques','opt1','opt2','opt3','opt4','opt5'],
   },
 };
 
@@ -429,7 +430,9 @@ function asmtValidateView(A){
     return `<tr><td class="tnum">${q.ordinal}</td>
       <td><span class="tag">${(q.type==='mcq'?'mcqsca':q.type==='multi'?'mcqmca':q.type).toUpperCase()}</span></td>
       <td>${q.level?`<span class="tag">${q.level}</span>`:'—'}</td>
-      <td style="max-width:300px">${q.prompt || '<span class="muted">(blank)</span>'}</td>
+      <td style="max-width:300px">${A.kind==='wpca'
+        ? (q.prompt ? `In the last two weeks, did <span class="muted">[name]</span> ${_asmtEsc(q.prompt)}?` : '<span class="muted">(blank)</span>')
+        : (q.prompt || '<span class="muted">(blank)</span>')}</td>
       <td>${q.options.length || '—'}</td>
       <td>${(q.competency||[]).map(c=>`<span class="tag">${c}</span>`).join(' ')||'—'}</td>
       <td>${status}</td></tr>`;
@@ -467,6 +470,7 @@ function asmtPreviewView(A){
 // a live participant-eye preview, and an image attach/remove control.
 function asmtEditorCard(q, i){
   const typeTag = (q.type==='mcq'?'mcqsca':q.type==='multi'?'mcqmca':q.type).toUpperCase();
+  const isW = !!(state.asmt && state.asmt.kind === 'wpca');   // WPCA uses the role stem
   const hasImg  = !!(q._imgURL || q.image_path);
   const imgBlock = hasImg
     ? `<div class="flex ac g12" style="margin-top:6px">
@@ -491,7 +495,7 @@ function asmtEditorCard(q, i){
 
     <div class="muted small" style="margin:12px 0 4px;font-weight:600">Participant preview</div>
     <div style="background:var(--g50);border:1px solid var(--g200);border-radius:8px;padding:12px">
-      <div id="asmtPrev${i}" style="font-weight:600;line-height:1.5">${mdToSafeHtml(q.prompt)||'<span class="muted">(empty)</span>'}</div>
+      <div style="font-weight:600;line-height:1.5">${isW?'<span class="muted">In the last two weeks, did [name] </span>':''}<span id="asmtPrev${i}">${mdToSafeHtml(q.prompt)||'<span class="muted">(empty)</span>'}</span>${isW?'<span class="muted">?</span>':''}</div>
       <div style="margin-top:12px">${asmtPreviewControls(q)}</div>
     </div>
 
@@ -865,10 +869,14 @@ function asmtDownloadTemplate(kind){
       + '2,Statistical reasoning,Foundational,tf,1,"Correlation implies causation.",True,False,,,,FALSE,TRUE,,,\n'
       + '3,Statistics,Intermediate,mcqmca,2,"Select all measures of spread.",Variance,Std deviation,Median,Range,,TRUE,TRUE,FALSE,TRUE,\n';
   } else {
-    csv = 'qno,competency,ques,opt1,opt2,opt3,opt4,opt5\n'
-      + '1,Communication,"Communicates analytical findings clearly to non-technical audiences.",Never,Rarely,Sometimes,Often,Always\n'
-      + '2,Collaboration,"Actively supports and unblocks teammates.",Strongly disagree,Disagree,Neutral,Agree,Strongly agree\n'
-      + '3,Reliability,"Delivers dependable work under deadlines.",Poor,Fair,Good,Very good,Excellent\n';
+    // WPCA v3: qtype column, one 'gate' row (Yes/Partially/No) per competency
+    // followed by its rating rows. Prompts are BARE verb phrases — the review
+    // player prepends "…did you / did {name} …" at rating time.
+    csv = 'qno,competency,qtype,ques,opt1,opt2,opt3,opt4,opt5\n'
+      + '1,Data-led Decision Making,gate,"apply this competency at work",Yes,Partially,No,,\n'
+      + '2,Data-led Decision Making,likert,"use data or evidence rather than assumption or precedent alone to support a recommendation","Seen but inconsistent","Consistent, independent","Consistent + guides others",,\n'
+      + '3,Data-led Decision Making,likert,"use tools like Excel, Power BI, or AI-supported platforms to find trends in data","Seen but inconsistent","Consistent, independent","Consistent + guides others",,\n'
+      + '4,Data-led Decision Making,likert,"support the team in using data to track or improve implementation","Seen but inconsistent","Consistent, independent","Consistent + guides others",,\n';
   }
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
   const a = document.createElement('a');
