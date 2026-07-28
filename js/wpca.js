@@ -174,7 +174,11 @@ function buildPanels(roster, subjects){
 
   // Pass 2 — peers: enforce the city rule, break ties by lowest load.
   subjects.forEach(function(s){
+    // A subject's own reports rate them UPWARD (as reportees), so they must not
+    // also be picked as peers of the same subject — that would create a duplicate
+    // (round, subject, rater) row and the roll-out RPC rejects duplicates.
     var exclude = {}; [s.id, s.mgr].filter(Boolean).forEach(function(x){ exclude[x]=true; });
+    (panels[s.id].reportees||[]).forEach(function(x){ exclude[x]=true; });
     var pool = roster.filter(function(r){ return !exclude[r.id]; });
     var sameCity = pool.filter(function(r){ return r.loc && s.loc && r.loc === s.loc; }).sort(byLoad);
     var diffCity = pool.filter(function(r){ return !(r.loc && s.loc && r.loc === s.loc); }).sort(byLoad);
@@ -626,18 +630,33 @@ function wpcaRenderReview(){
   var answered = qs.filter(function(q){ return R.answers[q.question_id] != null; }).length;
   var pct = qs.length ? Math.round(answered/qs.length*100) : 0;
 
+  // Role-aware stem ("light way"): each stored prompt is a bare verb phrase
+  // (e.g. "use data or evidence …"), and we prepend WHO is being rated using
+  // the role + subject name that start_wpca_review already returns. Self reads
+  // "…did you …"; every other role reads "…did {name} …". subject_name is
+  // escaped because it's a real person's name.
+  var stemWho = (d.rater_role === 'self') ? 'you' : wpcaEsc(d.subject_name || 'this person');
+  var stem = 'In the last two weeks, did ' + stemWho + ' ';
+
   var blocks = qs.map(function(q, i){
     var comp = Array.isArray(q.competency) ? q.competency.filter(Boolean).join(' · ') : (q.competency||'');
     var chosen = R.answers[q.question_id];
     var saving = R.saving[q.question_id];
-    var btns = WPCA_LIKERT.map(function(lbl, idx){
+    // Render the ACTUAL uploaded scale labels when the server provides them
+    // (start_wpca_review now returns q.options, lowest-first); fall back to the
+    // generic 5-point scale for older reviews that don't include options yet.
+    var labels = (Array.isArray(q.options) && q.options.length) ? q.options : WPCA_LIKERT;
+    var btns = labels.map(function(lbl, idx){
       var val = idx+1;
-      return '<button class="'+(chosen===val?'sel':'')+'" onclick="wpcaAnswer(\''+q.question_id+'\','+val+')">'+lbl+'</button>';
+      return '<button class="'+(chosen===val?'sel':'')+'" onclick="wpcaAnswer(\''+q.question_id+'\','+val+')">'+wpcaEsc(lbl)+'</button>';
     }).join('');
+    // Full sentence = stem + bare prompt + "?". A legacy full-sentence prompt
+    // still reads acceptably with the stem in front.
+    var sentence = stem + wpcaEsc(q.prompt) + '?';
     return '<div class="card pad" style="margin-bottom:12px">'+
       '<div class="flex jb ac" style="margin-bottom:6px"><span class="tag">Q'+(i+1)+(comp?(' · '+wpcaEsc(comp)):'')+'</span>'+
       (saving? '<span class="muted small">saving…</span>' : (chosen!=null?'<span class="muted small">saved ✓</span>':''))+'</div>'+
-      '<p style="margin:0 0 12px;font-weight:600">'+wpcaEsc(q.prompt)+'</p>'+
+      '<p style="margin:0 0 12px;font-weight:600">'+sentence+'</p>'+
       '<div class="likert">'+btns+'</div></div>';
   }).join('');
 
