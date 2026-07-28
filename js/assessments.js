@@ -373,9 +373,13 @@ function asmtDelete(id){
  *      is no soft-delete/recover. Deleting is permanent — the confirm copy
  *      says so, and the read below must NOT add .is('deleted_at', null)
  *      (that column doesn't exist and would error).
- *   2. We delete in TWO steps from the client — child score rows first, then
- *      the checkpoint row — so it works whether or not the DB was set up with
- *      ON DELETE CASCADE. (If a cascade does exist, step 1 is just redundant.)
+ *   2. Deleting goes through the delete_historical_checkpoint(uuid) RPC (see
+ *      sql/delete_historical_checkpoint.sql). That function removes the child
+ *      score rows AND the checkpoint row inside ONE transaction, so a delete
+ *      can never leave a checkpoint whose scores are half-gone. The RPC also
+ *      re-checks admin + org server-side, so this is safe even though it runs
+ *      from the browser.  ⚠ The RPC must exist in the database first, or the
+ *      Delete button will error with "function not found".
  * ===================================================================== */
 
 let _histListCache = { cid:null, list:null };   // same cache pattern as _asmtListCache
@@ -455,14 +459,10 @@ function histCkptDelete(id){
     onConfirm: async () => {
       closeModal();
       try{
-        // Step 1: remove the child score rows for this checkpoint.
-        const { error: e1 } = await sb.from('historical_competency_scores')
-          .delete().eq('checkpoint_id', id);
-        if (e1) throw e1;
-        // Step 2: remove the checkpoint row itself.
-        const { error: e2 } = await sb.from('historical_checkpoints')
-          .delete().eq('id', id);
-        if (e2) throw e2;
+        // ONE atomic call: the RPC deletes the score rows AND the checkpoint
+        // together inside a single DB transaction (either both go or neither).
+        const { error } = await sb.rpc('delete_historical_checkpoint', { p_checkpoint_id: id });
+        if (error) throw error;
 
         toast('Historical checkpoint deleted', 'ok');
         _histListCache = { cid:null, list:null };   // bust cache so the row disappears
