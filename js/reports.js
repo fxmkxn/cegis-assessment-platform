@@ -218,9 +218,13 @@ function renderReportFrom(content, opts){
   const suppNote=(content.notes&&content.notes.behavioral_suppressed)
     ? `<p class="muted small" style="margin-top:8px">Pooled-other ratings are withheld because fewer than ${content.notes.anonymity_floor||3} raters responded — protecting rater confidentiality. Only the self-assessment is charted.</p>`
     : '';
-  // DERIVED (not asked directly): overall application band + development focus,
-  // computed from the same 21 ratings on the radar. Hidden when there's no data.
-  const derived = wpcaDerivedApplication(c.radar);
+  // DERIVED (not asked directly): overall application band + development focus.
+  // Prefer the server-computed values (authoritative, also in the PDF and fed to
+  // the narrative); fall back to computing from the radar for reports generated
+  // before the server started providing them. Hidden when there's no data.
+  const derived = (content.derived && (content.derived.application_band || (content.derived.development_focus||[]).length))
+    ? { band: content.derived.application_band, focus: content.derived.development_focus || [] }
+    : wpcaDerivedApplication(c.radar);
   const derivedCard = derived ? `<div class="card pad" style="margin-top:12px">
         <span class="ai-label">✦ Derived from the 21 ratings</span>
         <div class="rep-2col" style="margin-top:10px">
