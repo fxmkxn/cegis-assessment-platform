@@ -211,7 +211,32 @@ function workloadCount(pid){
    ADMIN — Smart Configurator view
    ============================================================ */
 function vWPCA(){
-  // LIVE: load the cohort + instrument the first time the view opens.
+  // --- Cohort-switch cache invalidation -------------------------------------
+  // The working set (roster/subjects/panels) is cached and only rebuilt when
+  // WPCA.loaded is false. Without this block, switching the cohort selector
+  // would keep showing the PREVIOUS cohort's panels, because WPCA.loaded is
+  // still true. So: if the currently-selected cohort differs from the one we
+  // actually loaded (WPCA.cohortId), wipe the cache to force a fresh reload.
+  //
+  // Notes:
+  //  - WPCA.cohortId is null on the very first open, so this correctly does
+  //    nothing until a real cohort has been loaded once.
+  //  - wpcaLoadConfig() sets WPCA.cohortId to the new id immediately, so a
+  //    reload in progress won't re-trigger this (no infinite loop).
+  if (wpcaLive()){
+    var selectedCohort = wpcaCohortId();                 // what's chosen right now
+    if (selectedCohort && WPCA.cohortId && selectedCohort !== WPCA.cohortId){
+      WPCA.loaded  = false;                              // force wpcaLoadConfig() below
+      WPCA.loading = false;
+      WPCA.err     = null;
+      WPCA.roster = []; WPCA.subjects = []; WPCA.panels = {};   // drop stale cohort data
+      WPCA.instrumentId = null; WPCA.instrumentName = null;
+    }
+  }
+  // --------------------------------------------------------------------------
+
+  // LIVE: load the cohort + instrument the first time the view opens
+  // (or after the cache was invalidated just above).
   if (wpcaLive() && !WPCA.loaded){
     if (!WPCA.loading){ wpcaLoadConfig(); }   // fire and re-render on completion
     if (WPCA.err){
