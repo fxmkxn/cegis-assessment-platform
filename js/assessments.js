@@ -263,7 +263,8 @@ function asmtListView(){
   return `<div class="crumb">Manage / Assessments</div>
     <div class="page-head"><h1>Assessments</h1>
       <div class="flex g12 ac">${typeof histBtn==='function'?histBtn():''}<button class="btn" onclick="asmtNew()">＋ New assessment</button></div></div>
-    <div id="asmtListBody"><div class="card pad"><p class="muted small" style="margin:0">Loading…</p></div></div>`;
+    <div id="asmtListBody"><div class="card pad"><p class="muted small" style="margin:0">Loading…</p></div></div>
+    <div id="histListBody"></div>`;
 }
 function asmtNew(){
   state.asmt = { kind:'technical', stage:'eoca', name:'', step:0, creating:true };
@@ -305,6 +306,78 @@ function renderAsmtList(list){
     <div class="pad" style="border-bottom:1px solid var(--g200)"><div class="flex jb ac"><h3>Assessments in this cohort</h3><span class="muted small">${list.length} created</span></div></div>
     <div style="overflow:auto"><table><thead><tr><th>Name</th><th>Type</th><th>Stage</th><th>Status</th><th>Window</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
 }
+/* ---------- historical checkpoints (listed under the assessments) ----------
+ * A checkpoint is a point-in-time set of per-competency percentages with NO
+ * instrument, so it can't be a normal assessment row (no Type/Status/Window).
+ * We show them in their own card right below the assessments table. Data comes
+ * from the list_historical_checkpoints RPC (admin + org checked server-side);
+ * historical.js busts _histListCache after an import so a new one shows up.
+ */
+let _histListCache = { cid:null, list:null };
+
+// stage code -> friendly label (matches the picker in historical.js)
+const _histStageLabel = s => ({
+  baseline:'Baseline', eoca:'EoCA / mid-line', endline:'Endline', wpca:'WPCA'
+}[s] || (s || '—'));
+
+function renderHistList(list){
+  const fmt = d => d ? new Date(d).toLocaleDateString(undefined,{day:'2-digit',month:'short',year:'numeric'}) : '—';
+  // No checkpoints -> render nothing (keep the screen uncluttered).
+  if (!list.length) return '';
+  const rows = list.map(h => `<tr>
+    <td><b>${_asmtEsc(h.label)}</b></td>
+    <td><span class="tag">${_asmtEsc(_histStageLabel(h.stage))}</span></td>
+    <td class="muted small">${fmt(h.occurred_on)}</td>
+    <td class="muted small">${(h.participant_count||0)} participant(s) · ${(h.score_count||0)} score(s)</td>
+    <td style="text-align:right"><button class="btn ghost sm" onclick="histDelete('${h.id}')">Delete</button></td>
+  </tr>`).join('');
+  return `<div class="card" style="margin-top:16px">
+    <div class="pad" style="border-bottom:1px solid var(--g200)"><div class="flex jb ac">
+      <h3>Historical checkpoints</h3><span class="muted small">${list.length} imported</span></div>
+      <p class="muted small" style="margin:6px 0 0">Pre-platform marks — no online test. These appear on participants' reports alongside the in-app checkpoints.</p></div>
+    <div style="overflow:auto"><table><thead><tr><th>Label</th><th>Stage</th><th>Date</th><th>Coverage</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+}
+
+async function loadHistoricalList(force){
+  const el = document.getElementById('histListBody');
+  if (!el) return;                                  // not on the list screen
+  const authed = !!(typeof AUTH!=='undefined' && AUTH.session && !AUTH.demo);
+  if (!authed){ el.innerHTML = ''; return; }         // demo mode: nothing to show
+  const cid = currentCohortId();
+  if (!cid){ el.innerHTML = ''; return; }            // no cohort selected
+  // serve from cache unless forced
+  if (!force && _histListCache.cid===cid && _histListCache.list){ el.innerHTML = renderHistList(_histListCache.list); return; }
+  try{
+    const { data, error } = await sb.rpc('list_historical_checkpoints', { p_cohort_id: cid });
+    if (error) throw error;
+    _histListCache = { cid, list: data||[] };
+    el.innerHTML = renderHistList(_histListCache.list);
+  }catch(e){
+    // Non-fatal: never break the assessments screen if this read fails.
+    el.innerHTML = `<div class="card pad" style="margin-top:16px"><p class="muted small" style="margin:0">Couldn't load historical checkpoints: ${_asmtEsc((e&&e.message)||e)}</p></div>`;
+  }
+}
+
+function histDelete(id){
+  const h = (_histListCache.list||[]).find(x=>x.id===id);
+  const name = h ? h.label : 'this checkpoint';
+  showModal({
+    title: 'Delete historical checkpoint?',
+    body: `Delete <b>${_asmtEsc(name)}</b> and all of its imported scores? This permanently removes those marks from participants' reports and cannot be undone.`,
+    confirm: 'Delete',
+    onConfirm: async () => {
+      closeModal();
+      try{
+        const { error } = await sb.rpc('delete_historical_checkpoint', { p_checkpoint_id: id });
+        if (error) throw error;
+        toast('Checkpoint deleted', 'ok');
+        _histListCache = { cid:null, list:null };     // bust cache so the row disappears
+        loadHistoricalList(true);
+      }catch(e){ toast('Delete failed: ' + (e.message || e), 'err'); }
+    }
+  });
+}
+
 async function loadAssessmentList(force){
   const el = document.getElementById('asmtListBody');
   if (!el) return;                                  // not on the list (wizard mode / other screen)
@@ -315,8 +388,8 @@ async function loadAssessmentList(force){
     return;
   }
   const cid = currentCohortId();
-  if (!cid){ el.innerHTML = `<div class="card pad"><p class="muted small" style="margin:0">Select a cohort in the top bar to see its assessments.</p></div>`; return; }
-  if (!force && _asmtListCache.cid===cid && _asmtListCache.list){ el.innerHTML = renderAsmtList(_asmtListCache.list); return; }
+  if (!cid){ el.innerHTML = `<div class="card pad"><p class="muted small" style="margin:0">Select a cohort in the top bar to see its assessments.</p></div>`; loadHistoricalList(force); return; }
+  if (!force && _asmtListCache.cid===cid && _asmtListCache.list){ el.innerHTML = renderAsmtList(_asmtListCache.list); loadHistoricalList(force); return; }
   el.innerHTML = `<div class="card pad"><p class="muted small" style="margin:0">Loading…</p></div>`;
   try{
     const { data, error } = await sb.from('assessments')
@@ -326,6 +399,7 @@ async function loadAssessmentList(force){
     if (error) throw error;
     _asmtListCache = { cid, list: data||[] };
     el.innerHTML = renderAsmtList(_asmtListCache.list);
+    loadHistoricalList(force);                        // show this cohort's checkpoints too
   }catch(e){
     el.innerHTML = `<div class="card pad"><p class="badge err" style="margin:0">Couldn't load assessments: ${_asmtEsc((e&&e.message)||e)}</p></div>`;
   }
