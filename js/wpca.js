@@ -306,15 +306,23 @@ function vWPCA(){
   // LIVE: load the cohort + instrument the first time the view opens.
   if (wpcaLive() && !WPCA.loaded){
     if (!WPCA.loading){ wpcaLoadConfig(); }   // fire and re-render on completion
-    if (WPCA.err){
-      return '<div class="crumb">Lifecycle / WPCA · 360</div>'+
-        '<div class="page-head"><h1>WPCA Smart Configurator</h1></div>'+
-        '<div class="card pad"><span class="badge err">⚠ '+wpcaEsc(WPCA.err)+'</span>'+
-        '<p class="muted small" style="margin-top:10px">Upload a WPCA Likert instrument for this cohort (Assessments → upload, kind <b>WPCA</b>) and add the roster, then reopen this screen.</p></div>';
-    }
     return '<div class="crumb">Lifecycle / WPCA · 360</div>'+
       '<div class="page-head"><h1>WPCA Smart Configurator</h1></div>'+
       '<div class="card pad"><div class="muted">Loading the cohort and building panels…</div></div>';
+  }
+
+  // The load finished (WPCA.loaded is true) but this cohort has no WPCA
+  // instrument, or the load failed. WPCA.err is set TOGETHER with
+  // WPCA.loaded=true, so this check must live OUTSIDE the !WPCA.loaded block
+  // above — otherwise it could never fire and vWPCA() would fall through to
+  // render the previous cohort's still-cached panels. Showing the empty state
+  // here keeps the screen blank (no stale data) when there is nothing to
+  // configure for the selected cohort.
+  if (wpcaLive() && WPCA.err){
+    return '<div class="crumb">Lifecycle / WPCA · 360</div>'+
+      '<div class="page-head"><h1>WPCA Smart Configurator</h1></div>'+
+      '<div class="card pad"><span class="badge err">⚠ '+wpcaEsc(WPCA.err)+'</span>'+
+      '<p class="muted small" style="margin-top:10px">Upload a WPCA Likert instrument for this cohort (Assessments → upload, kind <b>WPCA</b>) and add the roster, then reopen this screen.</p></div>';
   }
 
   var set = wpcaSet();
@@ -446,7 +454,7 @@ function openSwap(subId, peerIdx){
   var cands = wpcaEligiblePeers(sub)
     .filter(function(r){ return !used[r.id] || r.id===current; })
     .sort(function(a,b){ return workloadCount(a.id)-workloadCount(b.id); });
-  var opts = cands.slice(0,8).map(function(r){
+  var opts = cands.map(function(r){
     var load = workloadCount(r.id);
     var badge = load>6 ? 'err' : (load<2 ? 'info' : 'ok');
     return '<div class="flex ac jb" style="padding:9px 10px;border:1px solid var(--g200);border-radius:9px;margin-bottom:7px;cursor:pointer'+(r.id===current?';background:var(--indigo-l)':'')+'" onclick="doSwap(\''+subId+'\','+peerIdx+',\''+r.id+'\')">'+
@@ -530,6 +538,11 @@ function wpcaDoRollout(roundName){
 /* LIVE: load the cohort roster + the WPCA instrument, then build panels. */
 function wpcaLoadConfig(){
   WPCA.loading = true; WPCA.err = null;
+  // Drop the previously-loaded cohort's data up front. If THIS load fails
+  // (e.g. the newly-selected cohort has no WPCA instrument), there is now
+  // nothing stale left for vWPCA() to fall back to and render — so the screen
+  // shows the empty state instead of the previous cohort's panels.
+  WPCA.roster = []; WPCA.subjects = []; WPCA.panels = {};
   var cohortId = wpcaCohortId();
   if (!cohortId){ WPCA.loading=false; WPCA.loaded=true; WPCA.err='No cohort selected.'; if(typeof renderAdmin==='function') renderAdmin(); return; }
   WPCA.cohortId = cohortId;
@@ -703,6 +716,51 @@ function wpcaOpenReview(panelId){
   });
 }
 
+/* Resolve the name of the person being reviewed from the review payload.
+   Live (start_wpca_review) and demo both set `subject_name`; the extra
+   aliases are a safety net in case the RPC shape ever varies. */
+function wpcaSubjectLabel(d){
+  if (!d) return '';
+  return d.subject_name || d.subjectName || d.subject || d.name || '';
+}
+
+/* Canonical WPCA 360 question wrapper — the SINGLE source of truth shared by
+   the admin "Participant preview" (assessments.js already calls this) and the
+   participant player below, so the two can never drift apart. It renders:
+
+       In the last two weeks, did <name> <stem>?
+
+   - the lead-in "In the last two weeks, did <name> " and the trailing "?"
+     are muted (grey); the stem is the instrument's question text.
+   - <name>: the admin preview passes NO subject, so it shows the literal
+     placeholder "[name]". The participant player DOES know who is being
+     reviewed and passes that name in, so reviewers see the real person
+     (this is the "placeholder filled in" behaviour that had reverted).
+   - <stem> is rendered with the same markdown the preview uses when
+     mdToSafeHtml() is available, else HTML-escaped as a fallback.
+
+   Args:
+     prompt  - the raw question stem.
+     stemId  - optional element id (admin editor uses it for live preview;
+               the player passes null).
+     subject - optional subject name; when given (player) it replaces the
+               "[name]" placeholder, when omitted (preview) "[name]" stays. */
+function wpca360PromptHtml(prompt, stemId, subject){
+  var idAttr = stemId ? ' id="' + stemId + '"' : '';
+
+  var who = (subject != null && String(subject).trim() !== '')
+    ? ((typeof wpcaEsc === 'function') ? wpcaEsc(String(subject).trim()) : String(subject).trim())
+    : '[name]';
+
+  var stem = (typeof mdToSafeHtml === 'function')
+    ? mdToSafeHtml(prompt)
+    : (typeof wpcaEsc === 'function' ? wpcaEsc(prompt || '') : String(prompt == null ? '' : prompt));
+
+  return '<span class="muted">In the last two weeks, did ' + who + ' </span>' +
+         '<span' + idAttr + '>' + (stem || '<span class="muted">(empty)</span>') + '</span>' +
+         '<span class="muted">?</span>';
+}
+
 function wpcaRenderReview(){
   var main = document.querySelector('.main'); if (!main) return;
   var R = WPCA.review; if (!R){ return; }
@@ -726,7 +784,7 @@ function wpcaRenderReview(){
     return '<div class="card pad" style="margin-bottom:12px">'+
       '<div class="flex jb ac" style="margin-bottom:6px"><span class="tag">Q'+(i+1)+(comp?(' · '+wpcaEsc(comp)):'')+'</span>'+
       (saving? '<span class="muted small">saving…</span>' : (chosen!=null?'<span class="muted small">saved ✓</span>':''))+'</div>'+
-      '<p style="margin:0 0 12px;font-weight:600">'+wpcaEsc(q.prompt)+'</p>'+
+      '<p style="margin:0 0 12px;font-weight:600">'+wpca360PromptHtml(q.prompt, null, wpcaSubjectLabel(d))+'</p>'+
       '<div class="likert">'+btns+'</div></div>';
   }).join('');
 
