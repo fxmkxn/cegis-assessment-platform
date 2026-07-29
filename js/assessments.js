@@ -315,20 +315,15 @@ function renderAsmtList(list){
  */
 let _histListCache = { cid:null, list:null };
 
-// stage code -> friendly label (matches the picker in historical.js)
-const _histStageLabel = s => ({
-  baseline:'Baseline', eoca:'EoCA / mid-line', endline:'Endline', wpca:'WPCA'
-}[s] || (s || '—'));
-
 function renderHistList(list){
   const fmt = d => d ? new Date(d).toLocaleDateString(undefined,{day:'2-digit',month:'short',year:'numeric'}) : '—';
   // No checkpoints -> render nothing (keep the screen uncluttered).
   if (!list.length) return '';
   const rows = list.map(h => `<tr>
     <td><b>${_asmtEsc(h.label)}</b></td>
-    <td><span class="tag">${_asmtEsc(_histStageLabel(h.stage))}</span></td>
+    <td>${_asmtEsc((h.stage||'').toUpperCase())}</td>
     <td class="muted small">${fmt(h.occurred_on)}</td>
-    <td class="muted small">${(h.participant_count||0)} participant(s) · ${(h.score_count||0)} score(s)</td>
+    <td class="muted small">${(h.participant_count||0)} participant(s)</td>
     <td style="text-align:right"><button class="btn ghost sm" onclick="histDelete('${h.id}')">Delete</button></td>
   </tr>`).join('');
   return `<div class="card" style="margin-top:16px">
