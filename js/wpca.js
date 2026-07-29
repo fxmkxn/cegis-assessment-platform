@@ -464,7 +464,12 @@ function openSwap(subId, peerIdx){
   }).join('') || '<div class="muted small">No other eligible raters available.</div>';
   if (typeof showModal === 'function') showModal({
     title:'Swap a peer for '+wpcaEsc(sub.n.split(/\s+/)[0]),
-    body:'<div class="muted small" style="margin-bottom:10px">Candidates ranked by current review load. Swapping recomputes the workload graph live.</div>'+opts,
+    // The candidate list is uncapped (every eligible rater, load-sorted), so it
+    // can be long. The modal body itself doesn't scroll (.mb has no max-height),
+    // so wrap the rows in their own scrollable box — otherwise the bottom of a
+    // long list runs off-screen and can't be reached/clicked.
+    body:'<div class="muted small" style="margin-bottom:10px">Candidates ranked by current review load. Swapping recomputes the workload graph live.</div>'+
+         '<div style="max-height:340px;overflow:auto;padding-right:2px">'+opts+'</div>',
     confirm:null, onConfirm:null
   });
 }
@@ -761,6 +766,73 @@ function wpca360PromptHtml(prompt, stemId, subject){
          '<span class="muted">?</span>';
 }
 
+/* ------------------------------------------------------------------
+   Per-question answer options for the 360 player — the "tidy column" step.
+
+   The uploaded WPCA instrument carries its OWN answer options, but depending on
+   how start_wpca_review() shapes them a question can arrive as ANY of these:
+     - q.options = ["Never","Rarely", …]                  (array of strings)
+     - q.options = [{ordinal,label}] / [{text}] / …       (array of objects; the
+         label may live under label/text/name/option/caption/value)
+     - q.opt1 … q.optN on the question object itself      (mirrors the CSV template)
+
+   Think of it like cleaning a messy survey export into one tidy column before
+   you chart it: whatever shape comes in, this returns ONE consistent array of
+   { ordinal, label } that the button code can simply loop over — so nothing
+   else in the player has to care about the incoming format. Blank labels (e.g.
+   an empty opt5) are dropped, and if no usable options are found we fall back
+   to the built-in 5-point Likert so a question is never left without buttons. */
+function wpcaQuestionOptions(q){
+  var out = [];
+  if (q){
+    var opts = q.options;
+
+    // Shape A — an array: either plain strings, or objects whose label sits
+    // under one of the common keys below.
+    if (Array.isArray(opts) && opts.length){
+      opts.forEach(function(o, i){
+        if (o == null) return;
+        var label;
+        if (typeof o === 'string' || typeof o === 'number'){
+          label = String(o);
+        } else {
+          label = o.label   != null ? o.label
+                : o.text    != null ? o.text
+                : o.name    != null ? o.name
+                : o.option  != null ? o.option
+                : o.caption != null ? o.caption
+                : o.value   != null ? o.value
+                : null;
+          label = (label == null) ? null : String(label);
+        }
+        if (label != null && label.trim() !== ''){
+          // keep the option's own ordinal when it's a usable number, else
+          // use its 1-based position; coerce to Number so the "selected"
+          // comparison against a saved answer always matches.
+          var ord = (o && o.ordinal != null && !isNaN(Number(o.ordinal))) ? Number(o.ordinal) : (i + 1);
+          out.push({ ordinal: ord, label: label });
+        }
+      });
+    }
+
+    // Shape B — opt1..optN fields directly on the question (CSV template shape).
+    if (!out.length){
+      for (var k = 1; k <= 12; k++){
+        var v = q['opt' + k];
+        if (v != null && String(v).trim() !== ''){
+          out.push({ ordinal: k, label: String(v) });
+        }
+      }
+    }
+  }
+
+  // Fallback — the built-in 5-point scale, so the survey always has buttons.
+  if (!out.length){
+    out = WPCA_LIKERT.map(function(lbl, i){ return { ordinal: i + 1, label: lbl }; });
+  }
+  return out;
+}
+
 function wpcaRenderReview(){
   var main = document.querySelector('.main'); if (!main) return;
   var R = WPCA.review; if (!R){ return; }
@@ -777,9 +849,9 @@ function wpcaRenderReview(){
     var comp = Array.isArray(q.competency) ? q.competency.filter(Boolean).join(' · ') : (q.competency||'');
     var chosen = R.answers[q.question_id];
     var saving = R.saving[q.question_id];
-    var btns = WPCA_LIKERT.map(function(lbl, idx){
-      var val = idx+1;
-      return '<button class="'+(chosen===val?'sel':'')+'" onclick="wpcaAnswer(\''+q.question_id+'\','+val+')">'+lbl+'</button>';
+    var btns = wpcaQuestionOptions(q).map(function(o){
+      var val = o.ordinal;                       // ordinal is what we save via wpcaAnswer
+      return '<button class="'+(chosen===val?'sel':'')+'" onclick="wpcaAnswer(\''+q.question_id+'\','+val+')">'+wpcaEsc(o.label)+'</button>';
     }).join('');
     return '<div class="card pad" style="margin-bottom:12px">'+
       '<div class="flex jb ac" style="margin-bottom:6px"><span class="tag">Q'+(i+1)+(comp?(' · '+wpcaEsc(comp)):'')+'</span>'+
