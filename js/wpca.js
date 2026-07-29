@@ -284,6 +284,25 @@ function wpcaApplyDraft(draft){
    ADMIN — Smart Configurator view
    ============================================================ */
 function vWPCA(){
+  // ---- Cohort-switch guard -------------------------------------------------
+  // The cohort dropdown re-renders the current view, but on its own it does NOT
+  // tell WPCA anything changed. WPCA caches the roster/subjects/panels it built
+  // and flips WPCA.loaded = true the FIRST time this screen opens. So without
+  // this guard, switching cohorts would leave WPCA.loaded === true and the
+  // screen would keep showing the PREVIOUS cohort's panels.
+  //
+  // Fix: compare the cohort WPCA last loaded (WPCA.cohortId) with the cohort
+  // that's selected right now (wpcaCohortId(), which reads state.cohortId /
+  // the dropdown). If they differ, wipe the cached "loaded" state so the block
+  // below re-runs wpcaLoadConfig() for the newly-selected cohort. (This mirrors
+  // how assessments.js caches its list per-cohort-id and reloads on change.)
+  if (wpcaLive() && WPCA.loaded && WPCA.cohortId && WPCA.cohortId !== wpcaCohortId()){
+    WPCA.loaded       = false;   // force a fresh load for the new cohort
+    WPCA.err          = null;    // clear any stale error from the old cohort
+    WPCA.draftSavedAt = null;    // the old cohort's draft note doesn't apply here
+    WPCA.draftRound   = null;
+  }
+
   // LIVE: load the cohort + instrument the first time the view opens.
   if (wpcaLive() && !WPCA.loaded){
     if (!WPCA.loading){ wpcaLoadConfig(); }   // fire and re-render on completion
@@ -334,7 +353,7 @@ function vWPCA(){
   '<div class="grid" style="grid-template-columns:300px 1fr">'+
     '<div>'+
       '<div class="card pad" style="margin-bottom:14px"><h3 style="margin-bottom:4px">Workload health</h3>'+
-        '<div class="muted small" style="margin-bottom:14px">Reviews assigned per participant · target band 2–6</div>'+
+        '<div class="muted small" style="margin-bottom:14px">Reviews assigned per participant</div>'+
         '<div id="workload"></div><hr style="margin:14px 0"><div id="wlstats" class="small"></div></div>'+
       '<div class="card pad"><h3 style="margin-bottom:8px;font-size:13px">Constraint priorities</h3>'+
         wpcaSlider('Location diversity',75)+wpcaSlider('Equitable load',85)+wpcaSlider('Workstream relevance',55)+'</div>'+
