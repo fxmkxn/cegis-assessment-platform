@@ -711,8 +711,19 @@ function wpcaOpenReview(panelId){
   sb.rpc('start_wpca_review', { p_panel_id: panelId }).then(function(res){
     if (res.error) throw res.error;
     WPCA.review.data = res.data;
-    // rehydrate saved answers
-    (res.data.questions||[]).forEach(function(q){ if (q.saved != null) WPCA.review.answers[q.question_id] = q.saved; });
+    // Rehydrate saved answers. The two kinds of question store their answer
+    // differently: a rating row comes back in `saved` (a number, e.g. 2), a
+    // gate row comes back in `saved_applied` (a word: 'yes'/'partially'/'no').
+    // Both go into the same answers map, keyed by question id — safe, because
+    // any given question is only ever one kind.
+    (res.data.questions||[]).forEach(function(q){
+      if (wpcaIsGate(q)){
+        if (q.saved_applied != null && String(q.saved_applied) !== '')
+          WPCA.review.answers[q.question_id] = String(q.saved_applied).toLowerCase();
+      } else if (q.saved != null){
+        WPCA.review.answers[q.question_id] = q.saved;
+      }
+    });
     WPCA.review.loading = false;
     wpcaRenderReview();
   }).catch(function(err){
@@ -833,6 +844,64 @@ function wpcaQuestionOptions(q){
   return out;
 }
 
+/* ------------------------------------------------------------------
+   GATE HELPERS
+
+   The WPCAS instrument has two kinds of row. For each competency there is:
+
+     • one GATE question  — "In the last two weeks, did {Name} apply this
+       competency at work?" answered Yes / Partially / No; and
+     • three RATING questions about that same competency.
+
+   If the rater says "No" — the subject did not apply this competency at all —
+   then rating how well they did it is meaningless, so those three questions
+   are hidden and are not required in order to submit.
+
+   The link between a gate and the ratings it controls is the COMPETENCY TAG:
+   a gate for "Data Management" hides every rating row tagged "Data
+   Management". That is why the spreadsheet has to spell the competency
+   identically across all four of its rows.
+   ------------------------------------------------------------------ */
+
+/* Is this row the gate question rather than a rating question? */
+function wpcaIsGate(q){
+  return !!q && String(q.type || '').toLowerCase() === 'gate';
+}
+
+/* A question's competency tags, always as an array (the RPC may send a single
+   string, an array, or nothing at all). */
+function wpcaCompsOf(q){
+  if (!q) return [];
+  var c = q.competency;
+  if (Array.isArray(c)) return c.filter(Boolean).map(String);
+  if (c == null || String(c) === '') return [];
+  return [String(c)];
+}
+
+/* The set of competencies this rater answered "No" to, as a lookup object
+   ({'Data Management': true, …}) so membership tests are cheap. */
+function wpcaGatedOffComps(qs, answers){
+  var off = {};
+  (qs || []).forEach(function(q){
+    if (!wpcaIsGate(q)) return;
+    if (String(answers[q.question_id] || '').toLowerCase() !== 'no') return;
+    wpcaCompsOf(q).forEach(function(c){ off[c] = true; });
+  });
+  return off;
+}
+
+/* The questions actually shown right now: every gate, plus the rating rows
+   whose competency has not been gated off. Everything that counts questions —
+   the progress bar, the Q numbers, the submit button — works off THIS list,
+   never the raw list, so hidden questions can't block submission. */
+function wpcaVisibleQuestions(qs, answers){
+  var off = wpcaGatedOffComps(qs, answers);
+  return (qs || []).filter(function(q){
+    if (wpcaIsGate(q)) return true;
+    return !wpcaCompsOf(q).some(function(c){ return off[c]; });
+  });
+}
+
 function wpcaRenderReview(){
   var main = document.querySelector('.main'); if (!main) return;
   var R = WPCA.review; if (!R){ return; }
@@ -841,7 +910,9 @@ function wpcaRenderReview(){
   if (R.err){ main.innerHTML = '<div class="page-head"><h1>360 review</h1></div><div class="card pad"><span class="badge err">⚠ '+wpcaEsc(R.err)+'</span><div style="margin-top:12px"><button class="btn ghost" onclick="wpcaCloseReview()">← Back to My 360 Tasks</button></div></div>'; return; }
 
   var d = R.data;
-  var qs = d.questions || [];
+  // `qs` is the VISIBLE list — rating rows behind a "No" gate are dropped, so
+  // they are neither shown, numbered, nor counted towards completion.
+  var qs = wpcaVisibleQuestions(d.questions || [], R.answers);
   var answered = qs.filter(function(q){ return R.answers[q.question_id] != null; }).length;
   var pct = qs.length ? Math.round(answered/qs.length*100) : 0;
 
@@ -849,14 +920,35 @@ function wpcaRenderReview(){
     var comp = Array.isArray(q.competency) ? q.competency.filter(Boolean).join(' · ') : (q.competency||'');
     var chosen = R.answers[q.question_id];
     var saving = R.saving[q.question_id];
+    var isGate = wpcaIsGate(q);
+
     var btns = wpcaQuestionOptions(q).map(function(o){
+      if (isGate){
+        // A gate answer is saved as the WORD, not the position — 'yes',
+        // 'partially' or 'no' — because that is what save_wpca_gate expects.
+        // (Saving the position is the old bug: "No" sits third, so it used to
+        // be stored as a rating of 3, the TOP of a 3-point scale.)
+        var tok = String(o.label).trim().toLowerCase().replace(/'/g, "\\'");
+        return '<button class="'+(chosen===tok?'sel':'')+'" onclick="wpcaAnswerGate(\''+q.question_id+'\',\''+tok+'\')">'+wpcaEsc(o.label)+'</button>';
+      }
       var val = o.ordinal;                       // ordinal is what we save via wpcaAnswer
       return '<button class="'+(chosen===val?'sel':'')+'" onclick="wpcaAnswer(\''+q.question_id+'\','+val+')">'+wpcaEsc(o.label)+'</button>';
     }).join('');
+
+    // The competency definition, shown on the GATE row only, so the rater can
+    // see what the competency actually means before deciding Yes/Partially/No.
+    // Rating rows carry the same text but don't display it — repeating it on
+    // all four rows would just be noise.
+    var descTxt = (q.description == null) ? '' : String(q.description).trim();
+    var desc = (isGate && descTxt)
+      ? '<p class="muted small" style="margin:0 0 12px;line-height:1.5">'+wpcaEsc(descTxt)+'</p>'
+      : '';
+
     return '<div class="card pad" style="margin-bottom:12px">'+
       '<div class="flex jb ac" style="margin-bottom:6px"><span class="tag">Q'+(i+1)+(comp?(' · '+wpcaEsc(comp)):'')+'</span>'+
       (saving? '<span class="muted small">saving…</span>' : (chosen!=null?'<span class="muted small">saved ✓</span>':''))+'</div>'+
-      '<p style="margin:0 0 12px;font-weight:600">'+wpca360PromptHtml(q.prompt, null, wpcaSubjectLabel(d))+'</p>'+
+      '<p style="margin:0 0 '+(desc?'8px':'12px')+';font-weight:600">'+wpca360PromptHtml(q.prompt, null, wpcaSubjectLabel(d))+'</p>'+
+      desc+
       '<div class="likert">'+btns+'</div></div>';
   }).join('');
 
@@ -872,6 +964,59 @@ function wpcaRenderReview(){
     '<button class="btn" '+(canSubmit?'':'disabled')+' onclick="wpcaSubmitReview()">'+(R.submitting?'Submitting…':'Submit review')+'</button></div>';
 }
 
+/* Save a GATE answer (Yes / Partially / No).
+
+   Separate from wpcaAnswer because it goes to a different RPC and stores a
+   different shape: save_wpca_gate writes {applied:'no'} rather than
+   {likert:3}. That distinction is what keeps gate answers out of the radar —
+   the competency averages only ever read the 'likert' key. */
+function wpcaAnswerGate(qid, applied){
+  var R = WPCA.review; if (!R) return;
+  var prev = R.answers[qid];
+  R.answers[qid] = applied;
+
+  // "No" hides this competency's rating questions. The server does the same to
+  // the stored data (save_wpca_gate deletes those ratings), so forget them
+  // locally too — otherwise the progress bar would keep counting answers to
+  // questions that are no longer on screen.
+  if (applied === 'no') wpcaForgetGatedAnswers(qid);
+
+  if (R.demo){ wpcaRenderReview(); return; }
+
+  R.saving[qid] = true; wpcaRenderReview();
+  sb.rpc('save_wpca_gate', { p_panel_id: R.panelId, p_question_id: qid, p_applied: applied })
+    .then(function(res){
+      R.saving[qid] = false;
+      if (res.error){
+        if (typeof toast==='function') toast(res.error.message||'Could not save answer','err');
+        if (prev == null) delete R.answers[qid]; else R.answers[qid] = prev;
+      }
+      wpcaRenderReview();
+    })
+    .catch(function(err){
+      R.saving[qid] = false;
+      if (typeof toast==='function') toast((err&&err.message)||'Could not save answer','err');
+      if (prev == null) delete R.answers[qid]; else R.answers[qid] = prev;
+      wpcaRenderReview();
+    });
+}
+
+/* Drop the locally-held ratings for every competency the given gate covers. */
+function wpcaForgetGatedAnswers(gateQid){
+  var R = WPCA.review; if (!R || !R.data) return;
+  var all = R.data.questions || [];
+  var gate = all.filter(function(q){ return q.question_id === gateQid; })[0];
+  if (!gate) return;
+  var comps = wpcaCompsOf(gate);
+  all.forEach(function(q){
+    if (wpcaIsGate(q)) return;
+    if (wpcaCompsOf(q).some(function(c){ return comps.indexOf(c) !== -1; }))
+      delete R.answers[q.question_id];
+  });
+}
+
+/* Save a RATING answer. Gate rows never reach here — the renderer wires them
+   to wpcaAnswerGate above, and save_wpca_response now rejects them anyway. */
 function wpcaAnswer(qid, val){
   var R = WPCA.review; if (!R) return;
   R.answers[qid] = val;

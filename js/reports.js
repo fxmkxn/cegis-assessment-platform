@@ -245,7 +245,7 @@ function renderReportFrom(content, opts){
   return `<div class="report-wrap"><div class="report-grid">
     <div class="section-nav" id="secNav">
       <a href="#summary" class="on">Summary</a><a href="#technical">Technical progression</a>
-      ${hasBehavioral?'<a href="#behavioral">Behavioral 360</a>':''}<a href="#themes">Strengths &amp; gaps</a><a href="#recs">Recommendations</a></div>
+      ${hasBehavioral?'<a href="#behavioral">WPCAS</a>':''}<a href="#themes">Strengths &amp; gaps</a><a href="#recs">Recommendations</a></div>
     <div id="reportRoot">
       <div id="reportBrand">${reportsBrandBarHtml(content.branding||null)}</div>
       <div class="flex jb ac" style="margin-bottom:16px">
@@ -265,7 +265,7 @@ function renderReportFrom(content, opts){
         <div class="ai-block"><span class="ai-label">✦ AI interpretation</span>
         <p style="margin:8px 0 0">${rEsc(n.technical_interpretation||'')}</p></div></section>
 
-      ${hasBehavioral?`<section id="behavioral" style="margin-top:26px"><h2 style="margin-bottom:4px">Behavioral 360</h2>
+      ${hasBehavioral?`<section id="behavioral" style="margin-top:26px"><h2 style="margin-bottom:4px">WPCAS</h2>
         <p class="muted small" style="margin-bottom:12px">Self-rating vs. aggregated other-raters (anonymized).</p>
         <div class="card pad" style="display:flex;justify-content:center">${radarChart(c.radar)}</div>
         ${c.radar?`<div class="legend" style="justify-content:center"><span><i style="background:var(--indigo)"></i>Self</span>${(c.radar.others)?'<span><i style="background:var(--teal)"></i>Others (aggregated)</span>':''}</div>`:''}
@@ -500,7 +500,7 @@ async function exportReport(){
     // behavioral 360 — omitted entirely when there is no 360 data
     const radSvg=(c.radar && (c.radar.axes||[]).length)?firstSvg(radarChart(c.radar)):null;
     if(radSvg){
-      stack.push(_pdfH2('Behavioral 360',[0,16,0,0]));
+      stack.push(_pdfH2('WPCAS',[0,16,0,0]));
       stack.push({ svg:_pdfCleanSvg(radSvg), width:300, alignment:'center', margin:[0,4,0,4] });
       if(n.behavioral_synthesis) stack.push(_pdfAI(n.behavioral_synthesis));
     }

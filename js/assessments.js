@@ -18,7 +18,9 @@
  *   opt1..opt5, isopt1correct..isopt5correct
  *   qtype ∈ { mcqsca (one correct), mcqmca (2+ correct), tf }
  * WPCA (wpca stage) — rating scale:
- *   qno, competency, ques, opt1..opt5
+ *   qno, competency, description, qtype, ques, opt1..opt5
+ *   description is the competency definition; the review player shows it
+ *   under the GATE question so raters know what the competency means.
  *   opt1..opt5 are the scale LABELS (any ordered words, opt1 = lowest);
  *   you are NOT limited to the standard agree/disagree wording.
  *
@@ -41,7 +43,7 @@ const ASMT_FORMATS = {
     stages: ['wpca'],
     // opt1..opt5 hold the scale LABELS — any ordered words, not just Likert agreement.
     // qtype marks a row as 'gate' (Yes/Partially/No) or 'likert'; blank = likert.
-    headers: ['qno','competency','qtype','ques','opt1','opt2','opt3','opt4','opt5'],
+    headers: ['qno','competency','description','qtype','ques','opt1','opt2','opt3','opt4','opt5'],
   },
 };
 
@@ -110,7 +112,12 @@ function mapAssessmentHeaders(headers){
   const map = {
     qno:        findBy(s => ['qno','questionno','qnumber','sno','srno','no','q'].includes(s) || s === '#'),
     qtype:      findBy(s => ['qtype','questiontype','type','format'].includes(s)),
-    competency: findBy(s => s.includes('competenc') || ['skill','axis','dimension'].includes(s)),
+    competency: findBy(s => (s.includes('competenc') && !s.includes('desc') && !s.includes('defin'))
+                          || ['skill','axis','dimension'].includes(s)),
+    // the competency definition (WPCA only). Note this must NOT match 'ques',
+    // which is why the ques matcher below looks for 'ques'/'question' only.
+    description: findBy(s => ['description','desc','definition','competencydescription',
+                              'competencydefinition','about','meaning'].includes(s)),
     level:      findBy(s => ['level','difficulty','tier','band','complexity'].includes(s)),
     ques:       findBy(s => s.includes('ques') || s.includes('question') || ['prompt','text','item'].includes(s)),
     marks:      findBy(s => ['marks','mark','points','point','score','weight','weightage'].includes(s)),
@@ -173,6 +180,11 @@ function validateAssessment(rows, map, format){
       // no qtype column keep working unchanged.
       const wtype = _normToken(get('qtype'));          // '', 'gate', 'likert', …
       q.type = (wtype === 'gate') ? 'gate' : 'likert';
+      // The competency definition. Optional — a file without the column still
+      // imports fine, raters just don't see a definition. Only the gate row's
+      // copy is ever displayed, but we keep it on every row so the column can
+      // be filled uniformly in the spreadsheet.
+      q.description = get('description') || null;
       q.marks = null;
       q.level = null;                       // level is a technical-only concept
       if (competency.length === 0) push('competency', 'a competency (the 360 radar axis) is required');
@@ -867,6 +879,7 @@ async function asmtDoDeploy(){
 
   const payload = A.questions.map(q => ({
     ordinal: q.ordinal, type: q.type, prompt: q.prompt,
+    description: q.description || null,
     level: q.level, competency: q.competency, marks: q.marks,
     image_path: q.image_path || null,
     options: q.options
@@ -952,11 +965,13 @@ function asmtDownloadTemplate(kind){
     // WPCA v3: qtype column, one 'gate' row (Yes/Partially/No) per competency
     // followed by its rating rows. Prompts are BARE verb phrases — the review
     // player prepends "…did you / did {name} …" at rating time.
-    csv = 'qno,competency,qtype,ques,opt1,opt2,opt3,opt4,opt5\n'
-      + '1,Data-led Decision Making,gate,"apply this competency at work",Yes,Partially,No,,\n'
-      + '2,Data-led Decision Making,likert,"use data or evidence rather than assumption or precedent alone to support a recommendation","Seen but inconsistent","Consistent, independent","Consistent + guides others",,\n'
-      + '3,Data-led Decision Making,likert,"use tools like Excel, Power BI, or AI-supported platforms to find trends in data","Seen but inconsistent","Consistent, independent","Consistent + guides others",,\n'
-      + '4,Data-led Decision Making,likert,"support the team in using data to track or improve implementation","Seen but inconsistent","Consistent, independent","Consistent + guides others",,\n';
+    const _d = '"Utilises data analytics to extract insights, present compelling perspectives, '
+             + 'and make strategic decisions for the efficient disposal of business."';
+    csv = 'qno,competency,description,qtype,ques,opt1,opt2,opt3,opt4,opt5\n'
+      + '1,Data-led Decision Making,' + _d + ',gate,"apply this competency at work",Yes,Partially,No,,\n'
+      + '2,Data-led Decision Making,' + _d + ',likert,"use data or evidence rather than assumption or precedent alone to support a recommendation","Seen but inconsistent","Consistent, independent","Consistent + guides others",,\n'
+      + '3,Data-led Decision Making,' + _d + ',likert,"use tools like Excel, Power BI, or AI-supported platforms to find trends in data","Seen but inconsistent","Consistent, independent","Consistent + guides others",,\n'
+      + '4,Data-led Decision Making,' + _d + ',likert,"support the team in using data to track or improve implementation","Seen but inconsistent","Consistent, independent","Consistent + guides others",,\n';
   }
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
   const a = document.createElement('a');
