@@ -448,9 +448,15 @@ function asmtUploadView(A){
         <input class="cohort-sel" style="width:100%" placeholder="e.g. EoCA 2 — Data Capacity"
                value="${A.name||''}" oninput="state.asmt.name=this.value"></div>
     </div>
-    <div class="flex jb ac wrap" style="margin-bottom:10px">
-      <h3>Upload ${fmt.label} instrument</h3>
-      <span class="tag">Columns: ${fmt.headers.slice(0,6).join(' · ')} …</span></div>
+    <div style="margin-bottom:10px">
+      <h3 style="margin:0 0 8px">Upload ${fmt.label} instrument</h3>
+      <div class="muted small" style="line-height:2">Expected columns in row 1 (order doesn't matter):
+        ${fmt.headers.map(h => `<span class="tag">${h}</span>`).join(' ')}</div>
+      ${A.kind === 'wpca' ? `<div class="muted small" style="margin-top:8px;line-height:1.6">
+        <b>qtype</b> — <b>gate</b> for the "apply this competency at work" row, or <b>likert</b> for a rating row (blank counts as likert).<br>
+        <b>description</b> — the competency definition. Raters see it underneath the gate question, so they know what the competency means.<br>
+        <b>ques</b> — a bare verb phrase; the player prepends "In the last two weeks, did [name] …".</div>` : ''}
+    </div>
     <input type="file" id="asmtFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="asmtPick(this.files[0])">
     <div class="dz" id="asmtDz" onclick="document.getElementById('asmtFile').click()"
          ondragover="event.preventDefault();this.classList.add('drag')"
@@ -498,6 +504,7 @@ function asmtPick(file){
 }
 
 function asmtValidateView(A){
+  const isW = A.kind === 'wpca';        // WPCA shows Description where technical shows Level
   const hardErrs = A.errors.filter(e => e.row !== 0);
   const fileErr = A.errors.find(e => e.row === 0);
   const rows = A.questions.map(q => {
@@ -510,7 +517,11 @@ function asmtValidateView(A){
         : '<span class="badge ok">✓ Valid</span>';
     return `<tr><td class="tnum">${q.ordinal}</td>
       <td><span class="tag">${(q.type==='mcq'?'mcqsca':q.type==='multi'?'mcqmca':q.type).toUpperCase()}</span></td>
-      <td>${q.level?`<span class="tag">${q.level}</span>`:'—'}</td>
+      <td style="max-width:260px">${isW
+        ? (q.description
+            ? `<span class="muted small" title="${_asmtEsc(q.description)}">${_asmtEsc(String(q.description).slice(0,90))}${String(q.description).length > 90 ? '…' : ''}</span>`
+            : '<span class="muted">—</span>')
+        : (q.level?`<span class="tag">${q.level}</span>`:'—')}</td>
       <td style="max-width:300px">${A.kind==='wpca'
         ? (q.prompt
             ? (typeof wpca360PromptHtml === 'function'
@@ -533,7 +544,7 @@ function asmtValidateView(A){
   const blocked = hardErrs.length > 0 || !!fileErr;
   return `<div class="card pad" style="margin-bottom:14px"><div class="flex ac g12">${banner}</div></div>
     <div class="card"><div style="overflow:auto"><table>
-      <thead><tr><th>#</th><th>Type</th><th>Level</th><th>Question text</th><th>Options</th><th>Competency</th><th>Status</th></tr></thead>
+      <thead><tr><th>#</th><th>Type</th><th>${isW?'Description':'Level'}</th><th>Question text</th><th>Options</th><th>Competency</th><th>Status</th></tr></thead>
       <tbody>${rows}</tbody></table></div></div>
     <div class="flex g12" style="margin-top:16px;justify-content:flex-end">
       <button class="btn ghost" onclick="state.asmt.step=0;renderAdmin()">← Re-upload</button>
@@ -544,7 +555,7 @@ function asmtValidateView(A){
 function asmtPreviewView(A){
   const cards = A.questions.map((q, i) => asmtEditorCard(q, i)).join('');
   return `<div class="card pad" style="margin-bottom:14px"><div class="flex ac g12"><span class="badge info">i</span>
-      <div>Edit each question's text and optionally attach an image. <b>**bold**</b>, <i>*italic*</i> and line breaks render for participants. Options, marks and competency tags come from your file.</div></div></div>
+      <div>Edit each question's text and optionally attach an image. <b>**bold**</b>, <i>*italic*</i> and line breaks render for participants. Options, marks, competency tags and the competency description come from your file.</div></div></div>
     ${cards}
     <div class="flex g12" style="margin-top:16px;justify-content:flex-end">
       <button class="btn ghost" onclick="state.asmt.step=1;renderAdmin()">← Back</button>
@@ -556,6 +567,12 @@ function asmtPreviewView(A){
 function asmtEditorCard(q, i){
   const typeTag = (q.type==='mcq'?'mcqsca':q.type==='multi'?'mcqmca':q.type).toUpperCase();
   const isW = !!(state.asmt && state.asmt.kind === 'wpca');   // WPCA uses the role stem
+  // The competency description is shown to raters on the GATE row only, so the
+  // preview mirrors that exactly — same text, same muted styling, same place.
+  const descTxt = (q.description == null) ? '' : String(q.description).trim();
+  const descPrev = (isW && q.type === 'gate' && descTxt)
+    ? `<p class="muted small" style="margin:8px 0 0;line-height:1.5">${_asmtEsc(descTxt)}</p>`
+    : '';
   const hasImg  = !!(q._imgURL || q.image_path);
   const imgBlock = hasImg
     ? `<div class="flex ac g12" style="margin-top:6px">
@@ -588,6 +605,7 @@ function asmtEditorCard(q, i){
               : `<span class="muted">In the last two weeks, did [name] </span><span id="asmtPrev${i}">${mdToSafeHtml(q.prompt)||'<span class="muted">(empty)</span>'}</span><span class="muted">?</span>`)
           : `<span id="asmtPrev${i}">${mdToSafeHtml(q.prompt)||'<span class="muted">(empty)</span>'}</span>`
       }</div>
+      ${descPrev}
       <div style="margin-top:12px">${asmtPreviewControls(q)}</div>
     </div>
 
