@@ -30,10 +30,16 @@
       shown as "needs updating" rather than rendered. This is what stops an
       old-shape report producing a broken page.
 
+   6. COHORT FAN-OUT CAN BE STOPPED. The run now carries a cancel flag that
+      the workers check between participants, plus a pre-flight dialog that
+      defaults to skipping reports already on the current shape. Stop cannot
+      abort requests already in flight — see the comment above the fan-out
+      block for why, and what the dialog tells the admin instead.
+
    UNCHANGED ON PURPOSE
      • Participants keep both Generate and Regenerate.
      • All numbers come from the server. This module never computes a score.
-     • Branding resolution and the cohort fan-out behave as before.
+     • Branding resolution behaves as before.
 
    Load order (unchanged): AFTER participant.js and wpca.js, BEFORE app.js.
    ============================================================ */
@@ -53,7 +59,8 @@ var REPORTS = {
   selfContent: null,
   selfState:   'idle',  // idle | loading | none | stale | ready | generating
   adminView:   null,    // { pid, name, content } when an admin opens one
-  fanout:      null
+  fanout:      null,    // live cohort run: items, counts, cancel flag
+  _fanoutPlan: null     // what the pre-flight dialog worked out needs doing
 };
 
 /* the only report shape this file can draw */
@@ -917,8 +924,20 @@ function vReports(){
     return renderReportFrom(REPORTS.adminView.content, { admin:true, canRegenerate:true, pid:REPORTS.adminView.pid });
   }
   setTimeout(reportsHydrateAdminList,0);
+
+  // If a cohort run is going and the admin closed the modal ("Run in
+  // background"), there would otherwise be no sign it is still happening.
+  const f=REPORTS.fanout;
+  const banner=(f && f.running)
+    ? `<div class="card pad flex ac jb" style="margin-bottom:12px;border-color:var(--indigo)">
+        <div><b>Report generation running</b>
+          <div class="muted small">${f.done} of ${f.total} complete${f.cancelRequested?' · stopping':''}</div></div>
+        <button class="btn ghost sm" onclick="renderFanoutModal()">Show progress</button></div>`
+    : '';
+
   return `<div class="crumb">Reports</div><div class="page-head"><h1>Reports</h1>
     <button class="btn" onclick="reportsCohortFanout()">＋ Generate cohort report</button></div>
+    ${banner}
     <div class="card pad"><h3 style="margin-bottom:12px">Individual reports</h3>
       <div id="reportList"><div class="muted small">Loading participants…</div></div></div>`;
 }
@@ -980,57 +999,234 @@ async function reportsAdminGenerate(pid, btn){
   }catch(e){ toast(String(e.message||e),'err'); if(btn){ btn.disabled=false; btn.textContent='Generate'; } }
 }
 
-/* ---- cohort fan-out: one request per participant, bounded parallelism ----
-   The Stop button and its cancellation flag are the next piece of work;
-   this is the existing behaviour, unchanged. */
+/* ============================================================
+   COHORT FAN-OUT — start, stop, and resume
+
+   HOW "STOP" ACTUALLY WORKS, AND WHAT IT CANNOT DO
+
+   Each report is a separate HTTPS request to the Edge Function. Once a
+   request has left the browser there is no way to recall it — the server
+   will finish generating that report whatever we do here.
+
+   So cancellation is checked BETWEEN participants, at the top of each
+   worker's loop. Pressing Stop means "start no more", not "abort what is
+   running". With three workers, up to three reports finish after you press
+   it. The dialog says so rather than pretending otherwise.
+
+   The whole run lives in this browser tab. Closing the tab stops it — the
+   reports already generated are saved, the rest simply never start. That is
+   safe, just worth knowing before someone closes their laptop halfway.
+   ============================================================ */
+
+/* Step 1 — work out what actually needs generating, then ask.
+   Regenerating a report that is already current costs a language-model call
+   and produces the same document, so the default is to skip those. */
 async function reportsCohortFanout(){
   const coh=reportsCohortId();
   if(!coh){ toast('Select a cohort first','err'); return; }
-  const { data:parts } = await sb.from('participants').select('id,name').eq('cohort_id',coh).is('deleted_at',null).order('name');
+
+  // Already running? Just show the progress dialog again.
+  if(REPORTS.fanout && REPORTS.fanout.running){ renderFanoutModal(); return; }
+
+  let parts=null, reps=null;
+  try{
+    const res=await Promise.all([
+      sb.from('participants').select('id,name').eq('cohort_id',coh).is('deleted_at',null).order('name'),
+      sb.from('reports').select('participant_id,status').eq('cohort_id',coh).eq('scope','participant').is('deleted_at',null)
+    ]);
+    parts=res[0].data; reps=res[1].data;
+  }catch(e){ toast('Could not load the cohort','err'); return; }
+
   if(!parts || !parts.length){ toast('No participants in this cohort','err'); return; }
-  REPORTS.fanout = { items: parts.map(p=>({ id:p.id, name:p.name, status:'queued', err:null })), done:0, total:parts.length, running:true };
+
+  const statusBy={}; (reps||[]).forEach(r=>{ statusBy[r.participant_id]=r.status; });
+  const missing = parts.filter(p=>!statusBy[p.id]);
+  const stale   = parts.filter(p=>statusBy[p.id] && statusBy[p.id]!=='ready');
+  const current = parts.filter(p=>statusBy[p.id]==='ready');
+  const needing = missing.concat(stale);
+
+  REPORTS._fanoutPlan={ all:parts, needing:needing };
+
+  const allLink = `<p style="margin:12px 0 0"><a href="#" style="font-size:12px"
+      onclick="event.preventDefault();reportsFanoutStart('all')">Or regenerate all ${parts.length}, including the ${current.length} already current</a></p>`;
+
+  showModal({
+    title:'Generate cohort reports',
+    body:`<p class="muted small" style="margin-top:0">${parts.length} participant${parts.length===1?'':'s'} in this cohort.</p>
+      <div class="kv" style="margin-bottom:12px">
+        <div>No report yet</div><div class="tnum">${missing.length}</div>
+        <div>Needs updating</div><div class="tnum">${stale.length}</div>
+        <div>Already current</div><div class="tnum">${current.length}</div>
+      </div>
+      <p class="muted small">Each report is one language-model call, so the default skips reports that are already current.</p>
+      <p class="muted small">This runs in this browser tab. You can close the dialog and keep working, but closing the tab stops it.</p>
+      ${current.length?allLink:''}`,
+    confirm: needing.length ? `Generate ${needing.length}` : 'Nothing to generate',
+    onConfirm: needing.length ? function(){ reportsFanoutStart('needing'); } : closeModal
+  });
+}
+
+/* Step 2 — run it. `mode` is 'needing' or 'all'. */
+async function reportsFanoutStart(mode){
+  const plan=REPORTS._fanoutPlan;
+  if(!plan){ toast('Nothing planned','err'); return; }
+  const list = (mode==='all') ? plan.all : plan.needing;
+  if(!list.length){ closeModal(); return; }
+
+  REPORTS.fanout={
+    items: list.map(p=>({ id:p.id, name:p.name, status:'queued', err:null })),
+    done:0,
+    total:list.length,
+    running:true,
+    cancelRequested:false,   // set by the Stop button
+    inFlight:0,              // how many requests are mid-air right now
+    stoppedEarly:false
+  };
   renderFanoutModal();
 
+  const f=REPORTS.fanout;
   const CONCURRENCY=3;
   let cursor=0;
+
   async function worker(){
-    while(cursor < REPORTS.fanout.items.length){
-      const it=REPORTS.fanout.items[cursor++];
-      it.status='generating'; updateFanoutRow(it);
+    while(true){
+      // THE CANCELLATION CHECK. Between participants, never mid-request.
+      if(f.cancelRequested) break;
+      if(cursor >= f.items.length) break;
+
+      const it=f.items[cursor++];
+      it.status='generating'; f.inFlight++;
+      updateFanoutRow(it); updateFanoutHead();
+
       try{
-        const { data, error } = await sb.functions.invoke('generate-report',{ body:{ participant_id:it.id, type:'comprehensive', regenerate:true } });
+        // regenerate:true so a stale row is rebuilt rather than handed back
+        // unchanged by the Edge Function's cheap re-read path.
+        const { data, error } = await sb.functions.invoke('generate-report',{
+          body:{ participant_id:it.id, type:'comprehensive', regenerate:true }
+        });
         if(error || (data&&data.error)) throw new Error((data&&data.error)||error.message);
         it.status='done';
-      }catch(e){ it.status='error'; it.err=String(e.message||e); }
-      REPORTS.fanout.done++; updateFanoutRow(it); updateFanoutHead();
+      }catch(e){
+        it.status='error'; it.err=String(e.message||e);
+      }
+
+      f.inFlight--; f.done++;
+      updateFanoutRow(it); updateFanoutHead();
     }
   }
-  await Promise.all(Array.from({length:Math.min(CONCURRENCY,parts.length)}, worker));
-  REPORTS.fanout.running=false; updateFanoutHead();
-  const failed=REPORTS.fanout.items.filter(i=>i.status==='error').length;
-  toast(failed? `Cohort done · ${failed} failed`:'Cohort report complete', failed?'err':'ok');
+
+  await Promise.all(Array.from({length:Math.min(CONCURRENCY,f.items.length)}, worker));
+
+  // Anything still queued when we stopped was never attempted. Say that
+  // rather than leaving it looking like it is still waiting its turn.
+  if(f.cancelRequested){
+    f.stoppedEarly=true;
+    f.items.forEach(it=>{ if(it.status==='queued'){ it.status='skipped'; updateFanoutRow(it); } });
+  }
+
+  f.running=false;
+  updateFanoutHead();
+
+  const okCount   = f.items.filter(i=>i.status==='done').length;
+  const failCount = f.items.filter(i=>i.status==='error').length;
+  const skipCount = f.items.filter(i=>i.status==='skipped').length;
+
+  let msg, kind;
+  if(f.stoppedEarly){
+    msg=`Stopped · ${okCount} generated, ${skipCount} not started` + (failCount?`, ${failCount} failed`:'');
+    kind='err';
+  } else if(failCount){
+    msg=`Finished · ${okCount} generated, ${failCount} failed`;
+    kind='err';
+  } else {
+    msg=`Cohort reports complete · ${okCount} generated`;
+    kind='ok';
+  }
+  toast(msg, kind);
+
   reportsHydrateAdminList();
 }
-function fanoutPill(s){ return s==='done'?'<span class="badge ok">✓ done</span>'
-  : s==='generating'?'<span class="badge info">generating…</span>'
-  : s==='error'?'<span class="badge err">failed</span>'
-  : '<span class="tag">queued</span>'; }
-function renderFanoutModal(){
+
+/* Step 3 — the Stop button. Sets a flag; the workers notice it on their
+   next pass. Deliberately does not try to abort in-flight requests. */
+function reportsFanoutStop(){
   const f=REPORTS.fanout;
-  const rows=f.items.map(it=>`<div class="flex ac jb" id="fo_${it.id}" style="padding:8px 0;border-bottom:1px solid var(--g100)">
-    <span>${rEsc(it.name)}</span>${fanoutPill(it.status)}</div>`).join('');
-  document.getElementById('modalRoot').innerHTML=`<div class="modal-bg">
-    <div class="modal" style="max-width:520px"><div class="mh"><h2>Generating cohort reports</h2></div>
-    <div class="mb"><div id="foHead" class="muted small" style="margin-bottom:6px"></div>
-      <div class="bar" style="margin-bottom:10px"><i id="foBar" style="width:0%"></i></div>
-      <div style="max-height:300px;overflow:auto">${rows}</div></div>
-    <div class="mf"><button class="btn ghost" id="foClose" onclick="closeModal()">Run in background</button></div></div></div>`;
+  if(!f || !f.running || f.cancelRequested) return;
+  f.cancelRequested=true;
   updateFanoutHead();
 }
-function updateFanoutRow(it){ const el=document.getElementById('fo_'+it.id); if(el){ const pill=el.querySelector('.badge,.tag'); if(pill) pill.outerHTML=fanoutPill(it.status); } }
+
+function fanoutPill(s){
+  return s==='done'       ? '<span class="badge ok">✓ done</span>'
+       : s==='generating' ? '<span class="badge info">generating…</span>'
+       : s==='error'      ? '<span class="badge err">failed</span>'
+       : s==='skipped'    ? '<span class="tag">not started</span>'
+       : '<span class="tag">queued</span>';
+}
+
+function renderFanoutModal(){
+  const f=REPORTS.fanout;
+  if(!f) return;
+  const host=document.getElementById('modalRoot');
+  // The dialog is only a view onto the run. If the host is missing for any
+  // reason, carry on generating silently rather than throwing and killing
+  // the workers mid-cohort.
+  if(!host) return;
+  const rows=f.items.map(it=>`<div class="flex ac jb" id="fo_${it.id}" style="padding:8px 0;border-bottom:1px solid var(--g100)">
+    <span>${rEsc(it.name)}</span>${fanoutPill(it.status)}</div>`).join('');
+  host.innerHTML=`<div class="modal-bg">
+    <div class="modal" style="max-width:560px">
+      <div class="mh"><h2>Generating cohort reports</h2></div>
+      <div class="mb">
+        <div id="foHead" class="muted small" style="margin-bottom:6px"></div>
+        <div class="bar" style="margin-bottom:10px"><i id="foBar" style="width:0%"></i></div>
+        <div style="max-height:300px;overflow:auto">${rows}</div>
+      </div>
+      <div class="mf flex g8 ac">
+        <button class="btn ghost" id="foStop" onclick="reportsFanoutStop()">■ Stop</button>
+        <button class="btn ghost" id="foClose" onclick="closeModal()">Run in background</button>
+      </div></div></div>`;
+  updateFanoutHead();
+}
+
+function updateFanoutRow(it){
+  const el=document.getElementById('fo_'+it.id);
+  if(el){ const pill=el.querySelector('.badge,.tag'); if(pill) pill.outerHTML=fanoutPill(it.status); }
+}
+
 function updateFanoutHead(){
-  const f=REPORTS.fanout; const head=document.getElementById('foHead'), bar=document.getElementById('foBar'), close=document.getElementById('foClose');
-  if(head) head.textContent=`${f.done} of ${f.total} complete${f.running?' · generating…':''}`;
-  if(bar) bar.style.width=Math.round(100*f.done/f.total)+'%';
+  const f=REPORTS.fanout;
+  if(!f) return;
+  const head=document.getElementById('foHead');
+  const bar=document.getElementById('foBar');
+  const close=document.getElementById('foClose');
+  const stop=document.getElementById('foStop');
+
+  let msg;
+  if(f.running && f.cancelRequested){
+    // Being explicit here matters. "Stopping" with a spinner and no
+    // explanation looks broken; naming the in-flight count explains the wait.
+    msg = f.inFlight
+      ? `Stopping — finishing ${f.inFlight} already in progress…`
+      : 'Stopping…';
+  } else if(f.running){
+    msg = `${f.done} of ${f.total} complete · generating…`;
+  } else if(f.stoppedEarly){
+    const skipped=f.items.filter(i=>i.status==='skipped').length;
+    msg = `Stopped · ${f.done} of ${f.total} complete, ${skipped} not started`;
+  } else {
+    msg = `${f.done} of ${f.total} complete`;
+  }
+
+  if(head) head.textContent=msg;
+  if(bar)  bar.style.width=Math.round(100*f.done/Math.max(1,f.total))+'%';
+
+  if(stop){
+    if(!f.running){ stop.style.display='none'; }
+    else {
+      stop.disabled = !!f.cancelRequested;
+      stop.textContent = f.cancelRequested ? 'Stopping…' : '■ Stop';
+    }
+  }
   if(close && !f.running) close.textContent='Close';
 }
