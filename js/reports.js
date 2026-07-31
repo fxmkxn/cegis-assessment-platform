@@ -37,7 +37,12 @@
       instrument actually has three anchors — so every score rendered against
       an axis half again too long.
 
-   7. COHORT FAN-OUT CAN BE STOPPED. The run now carries a cancel flag that
+   7. PARTICIPANT SELF-SERVICE CAN BE SWITCHED OFF per cohort. When off,
+      participants see their report read-only with no Generate or Regenerate
+      button, and admins get a toggle on the Reports screen. Admins are never
+      blocked. The Edge Function enforces it; this only decides what shows.
+
+   8. COHORT FAN-OUT CAN BE STOPPED. The run now carries a cancel flag that
       the workers check between participants, plus a pre-flight dialog that
       defaults to skipping reports already on the current shape. Stop cannot
       abort requests already in flight — see the comment above the fan-out
@@ -67,7 +72,14 @@ var REPORTS = {
   selfState:   'idle',  // idle | loading | none | stale | ready | generating
   adminView:   null,    // { pid, name, content } when an admin opens one
   fanout:      null,    // live cohort run: items, counts, cancel flag
-  _fanoutPlan: null     // what the pre-flight dialog worked out needs doing
+  _fanoutPlan: null,    // what the pre-flight dialog worked out needs doing
+
+  // Participant self-service lock (cohorts.participant_reports_enabled).
+  // null = not yet known. Default to true when unknown so a failed lookup
+  // never hides a button a participant is entitled to — the Edge Function is
+  // the actual enforcer and will refuse with a clear message if need be.
+  selfService:      null,   // participant side, for their own cohort
+  adminSelfService: null    // admin side, for the selected cohort
 };
 
 /* the only report shape this file can draw */
@@ -674,9 +686,24 @@ async function reportsBrandPatch(content, opts){
 function pReport(){
   if(!reportsLive()) return REPORTS_PROTO.pReport ? REPORTS_PROTO.pReport() : '';
 
+  // When self-service is off the report is read-only: no Regenerate button.
+  const canSelfGen = REPORTS.selfService !== false;
+
   if(REPORTS.selfState==='ready' && REPORTS.selfContent){
-    return renderReportFrom(REPORTS.selfContent, { canRegenerate:true, pid:REPORTS.selfPid });
+    return renderReportFrom(REPORTS.selfContent, { canRegenerate:canSelfGen, pid:REPORTS.selfPid });
   }
+
+  // Admin-controlled mode, and nothing to show yet. Offering a Generate
+  // button here would be worse than useless — the Edge Function would refuse
+  // it — so explain who to expect the report from instead.
+  if(!canSelfGen && (REPORTS.selfState==='none' || REPORTS.selfState==='stale')){
+    return `<div class="page-head"><h1>My Reports</h1></div>
+      <div class="card pad" style="max-width:620px;text-align:center">
+        <div style="font-size:40px">✦</div>
+        <h3 style="margin:8px 0">Your report is being prepared</h3>
+        <p class="muted" style="margin:0 auto;max-width:460px">Reports for your cohort are produced by your programme team. Yours will appear here once it's ready.</p></div>`;
+  }
+
   if(REPORTS.selfState==='stale'){
     return `<div class="page-head"><h1>My Reports</h1></div>
       <div class="card pad" style="max-width:620px;text-align:center">
@@ -719,6 +746,18 @@ async function reportsHydrateSelf(){
   try{
     const pid = await reportsResolveSelfPid();
     if(!pid){ REPORTS.selfState='none'; renderParticipant(); return; }
+
+    // Is self-service on for this participant's cohort? Read through the RPC
+    // rather than selecting from cohorts directly, because participants may
+    // not have read access to that table.
+    const cohId = REPORTS.selfSubject && REPORTS.selfSubject.cohort_id;
+    if(cohId){
+      try{
+        const { data:en } = await sb.rpc('participant_reports_enabled', { p_cohort: cohId });
+        REPORTS.selfService = (en === false) ? false : true;
+      }catch(e){ REPORTS.selfService = true; }   // unknown: assume allowed
+    } else { REPORTS.selfService = true; }
+
     const { data } = await sb.from('reports')
       .select('id,content,generated_at,type,status')
       .eq('participant_id', pid).eq('scope','participant').is('deleted_at', null)
@@ -748,6 +787,11 @@ async function reportsGenerateSelf(){
     REPORTS.selfContent=data.content; REPORTS.selfState='ready';
     toast('Report ready','ok');
   }catch(e){
+    // If the refusal was the self-service lock, remember it so the button
+    // disappears rather than inviting another refused attempt.
+    if(String(e.message||e).indexOf('prepared by your programme team')>=0){
+      REPORTS.selfService=false;
+    }
     REPORTS.selfState= REPORTS.selfContent ? 'ready':'none';
     toast(String(e.message||e),'err');
   }
@@ -978,14 +1022,54 @@ function vReports(){
   return `<div class="crumb">Reports</div><div class="page-head"><h1>Reports</h1>
     <button class="btn" onclick="reportsCohortFanout()">＋ Generate cohort report</button></div>
     ${banner}
+    ${reportsSelfServiceStrip()}
     <div class="card pad"><h3 style="margin-bottom:12px">Individual reports</h3>
       <div id="reportList"><div class="muted small">Loading participants…</div></div></div>`;
+}
+
+/* Admin control for the per-cohort participant self-service lock.
+   Returns '' until the flag has been read, so the strip does not flicker
+   through a wrong state on first paint. */
+function reportsSelfServiceStrip(){
+  const en=REPORTS.adminSelfService;
+  if(en===null || en===undefined) return '';
+  return `<div class="card pad flex ac jb" style="margin-bottom:12px">
+    <div><b>Participant self-service · ${en?'on':'off'}</b>
+      <div class="muted small">${en
+        ? 'Participants can generate and regenerate their own report.'
+        : 'Admin-controlled. Participants can view their report but not generate it.'}</div></div>
+    <button class="btn ghost sm" onclick="reportsToggleSelfService()">${en?'Turn off':'Turn on'}</button></div>`;
+}
+
+async function reportsToggleSelfService(){
+  const coh=reportsCohortId();
+  if(!coh){ toast('Select a cohort first','err'); return; }
+  const next = !REPORTS.adminSelfService;
+  try{
+    const { error } = await sb.from('cohorts')
+      .update({ participant_reports_enabled: next }).eq('id', coh);
+    if(error) throw error;
+    REPORTS.adminSelfService=next;
+    toast(next
+      ? 'Participants can now generate their own reports'
+      : 'Reports are now admin-controlled for this cohort','ok');
+    renderAdmin();
+  }catch(e){ toast(String(e.message||e),'err'); }
 }
 
 async function reportsHydrateAdminList(){
   const host=document.getElementById('reportList'); if(!host) return;
   const coh=reportsCohortId();
   if(!coh){ host.innerHTML='<div class="muted small">Select a cohort to see its participants.</div>'; return; }
+  // Read the self-service flag for this cohort at the same time as the list.
+  // Named cohRow, not coh: destructuring into `coh` would shadow the cohort id
+  // declared above and throw a ReferenceError on the very same line.
+  try{
+    const { data:cohRow } = await sb.from('cohorts')
+      .select('participant_reports_enabled').eq('id',coh).maybeSingle();
+    if(cohRow) REPORTS.adminSelfService = cohRow.participant_reports_enabled !== false;
+  }catch(e){ /* leave as null; the strip stays hidden */ }
+
   try{
     const [{data:parts},{data:reps}] = await Promise.all([
       sb.from('participants').select('id,name,designation,workstream,location').eq('cohort_id',coh).is('deleted_at',null).order('name'),
