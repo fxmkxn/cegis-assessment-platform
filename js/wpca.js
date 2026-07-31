@@ -668,6 +668,23 @@ function wpcaTaskRowDemo(me, r){
     '<button class="btn ghost sm" onclick="wpcaOpenReview(\'demo:'+r.id+'\')">Start review →</button></div>';
 }
 
+/* Did this error mean "the admin withdrew this review while you had it open"?
+   The server raises one of these when the round was withdrawn or its
+   instrument was deleted (see delete_assessment / start_wpca_review).
+   When it happens there is nothing useful the participant can do on this
+   screen, so we drop the cached task list and send them back to it. */
+function wpcaIsWithdrawnError(err){
+  var m = (err && err.message) ? String(err.message) : String(err || '');
+  return /round not found or withdrawn|no longer available|panel not found/i.test(m);
+}
+function wpcaHandleWithdrawn(err){
+  if (!wpcaIsWithdrawnError(err)) return false;      // not this case — caller handles it
+  if (typeof toast==='function') toast('This review is no longer available — it was withdrawn by your administrator','err');
+  WPCA.tasks = null;                                  // force a fresh list on the way back
+  wpcaCloseReview();
+  return true;                                        // handled
+}
+
 function wpcaLoadTasks(){
   WPCA._tasksLoading = true; WPCA.tasksErr = null;
   sb.rpc('list_my_360_tasks').then(function(res){
@@ -727,7 +744,9 @@ function wpcaOpenReview(panelId){
     WPCA.review.loading = false;
     wpcaRenderReview();
   }).catch(function(err){
-    WPCA.review.loading = false; WPCA.review.err = (err&&err.message)||'Could not open this review';
+    WPCA.review.loading = false;
+    if (wpcaHandleWithdrawn(err)) return;             // withdrawn — bounce to the task list
+    WPCA.review.err = (err&&err.message)||'Could not open this review';
     wpcaRenderReview();
   });
 }
@@ -988,15 +1007,17 @@ function wpcaAnswerGate(qid, applied){
     .then(function(res){
       R.saving[qid] = false;
       if (res.error){
-        if (typeof toast==='function') toast(res.error.message||'Could not save answer','err');
         if (prev == null) delete R.answers[qid]; else R.answers[qid] = prev;
+        if (wpcaHandleWithdrawn(res.error)) return;   // withdrawn — leave this screen
+        if (typeof toast==='function') toast(res.error.message||'Could not save answer','err');
       }
       wpcaRenderReview();
     })
     .catch(function(err){
       R.saving[qid] = false;
-      if (typeof toast==='function') toast((err&&err.message)||'Could not save answer','err');
       if (prev == null) delete R.answers[qid]; else R.answers[qid] = prev;
+      if (wpcaHandleWithdrawn(err)) return;
+      if (typeof toast==='function') toast((err&&err.message)||'Could not save answer','err');
       wpcaRenderReview();
     });
 }
@@ -1027,10 +1048,19 @@ function wpcaAnswer(qid, val){
   sb.rpc('save_wpca_response', { p_panel_id: R.panelId, p_question_id: qid, p_likert: val })
     .then(function(res){
       R.saving[qid] = false;
-      if (res.error){ if(typeof toast==='function') toast(res.error.message||'Could not save answer','err'); delete R.answers[qid]; }
+      if (res.error){
+        delete R.answers[qid];
+        if (wpcaHandleWithdrawn(res.error)) return;   // withdrawn — leave this screen
+        if (typeof toast==='function') toast(res.error.message||'Could not save answer','err');
+      }
       wpcaRenderReview();
     })
-    .catch(function(err){ R.saving[qid]=false; if(typeof toast==='function') toast((err&&err.message)||'Could not save answer','err'); delete R.answers[qid]; wpcaRenderReview(); });
+    .catch(function(err){
+      R.saving[qid]=false; delete R.answers[qid];
+      if (wpcaHandleWithdrawn(err)) return;
+      if(typeof toast==='function') toast((err&&err.message)||'Could not save answer','err');
+      wpcaRenderReview();
+    });
 }
 
 function wpcaSubmitReview(){
@@ -1047,12 +1077,18 @@ function wpcaSubmitReview(){
 
   sb.rpc('submit_wpca_panel', { p_panel_id: R.panelId }).then(function(res){
     R.submitting = false;
-    if (res.error){ if(typeof toast==='function') toast(res.error.message||'Could not submit','err'); wpcaRenderReview(); return; }
+    if (res.error){
+      if (wpcaHandleWithdrawn(res.error)) return;     // withdrawn — nothing to submit into
+      if(typeof toast==='function') toast(res.error.message||'Could not submit','err');
+      wpcaRenderReview(); return;
+    }
     if (typeof toast==='function') toast('360 review submitted','ok');
     WPCA.tasks = null;            // refresh the task list on return
     wpcaCloseReview();
   }).catch(function(err){
-    R.submitting = false; if(typeof toast==='function') toast((err&&err.message)||'Could not submit','err'); wpcaRenderReview();
+    R.submitting = false;
+    if (wpcaHandleWithdrawn(err)) return;
+    if(typeof toast==='function') toast((err&&err.message)||'Could not submit','err'); wpcaRenderReview();
   });
 }
 

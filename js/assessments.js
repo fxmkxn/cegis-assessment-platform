@@ -431,6 +431,40 @@ function asmtDelete(id){
   });
 }
 
+/* ============================================================
+   Duplicate-name guard
+   ------------------------------------------------------------
+   The DATABASE is what actually enforces this (a unique index on
+   cohort_id + lower(trim(name)) where deleted_at is null, plus a matching
+   check inside import_assessment). This function exists purely so the
+   admin finds out at the NAME FIELD, before spending time uploading and
+   fixing a whole spreadsheet, instead of at the very last deploy click.
+
+   Returns the clashing assessment's name, or null if the name is free.
+   On any network/permission failure it returns null — i.e. it fails OPEN
+   and lets the attempt through, because the database will still refuse it.
+   ============================================================ */
+async function asmtFindNameClash(cohortId, name){
+  const wanted = String(name || '').trim().toLowerCase();
+  if (!wanted || !cohortId) return null;
+  try {
+    // Fetch the cohort's live names and compare in JS. (Doing the match here
+    // rather than with .ilike() avoids a subtle trap: in SQL LIKE/ILIKE, the
+    // characters % and _ are WILDCARDS, so an assessment named "EoCA — 100%
+    // coverage" would appear to clash with almost anything.)
+    const { data, error } = await sb.from('assessments')
+      .select('name')
+      .eq('cohort_id', cohortId)
+      .is('deleted_at', null);          // deleted ones don't count — the name is free again
+    if (error) throw error;
+    const hit = (data || []).find(r => String(r.name || '').trim().toLowerCase() === wanted);
+    return hit ? hit.name : null;
+  } catch (e){
+    console.warn('[CEGIS] duplicate-name pre-check skipped:', e && e.message);
+    return null;                        // fail open; the DB is the real gate
+  }
+}
+
 function asmtUploadView(A){
   const fmt = ASMT_FORMATS[A.kind];
   const stageOpts = fmt.stages.map(s =>
@@ -485,6 +519,15 @@ function asmtPick(file){
   mountOctopus(document.querySelector('.main'), 'Parsing your question bank…');
   (async () => {
     try {
+      // Reject a duplicate name BEFORE parsing, so the admin isn't asked to
+      // clean up a spreadsheet only to be blocked at the final deploy step.
+      const clash = await asmtFindNameClash(currentCohortId(), A.name);
+      if (clash){
+        toast(`“${clash}” already exists in this cohort — choose a different name`, 'err');
+        A.file = null; A.fileName = null;
+        A.step = 0; renderAdmin();
+        return;
+      }
       const { headers, rows } = await readSheet(file);
       const map = mapAssessmentHeaders(headers);
       const result = validateAssessment(rows, map, A.kind);
@@ -966,6 +1009,14 @@ async function asmtDoDeploy(){
     state.asmt = { kind:'technical', stage:'eoca', name:'', step:0, creating:false };
     go('assessments');
   } catch (e){
+    // A duplicate name can only be caught for certain by the database (someone
+    // else may have taken it since the pre-check at upload time). Postgres code
+    // 23505 = unique violation, which is what import_assessment raises for it.
+    // Send the admin back to step 0, where the name field lives, not step 3.
+    if (e && (e.code === '23505' || /already exists in this cohort/i.test(e.message || ''))){
+      toast(e.message || 'That assessment name is already used in this cohort', 'err');
+      state.asmt.step = 0; renderAdmin(); return;
+    }
     toast('Deploy failed: ' + (e.message || e), 'err');
     state.asmt.step = 3; renderAdmin();
   }
