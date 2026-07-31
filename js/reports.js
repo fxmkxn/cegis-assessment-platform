@@ -1,31 +1,41 @@
 /* ============================================================
-   CEGIS — js/reports.js  (Phase 10, front end)
+   CEGIS — js/reports.js  (v2 report contract)
 
-   Wires the report screens to real, persisted data:
+   WHAT CHANGED FROM THE PREVIOUS VERSION
 
-   • Participant "My Reports" (pReport): reads the latest persisted
-     report from reports.content and renders it. The octopus loader
-     shows ONLY on first generation or an explicit Regenerate — a
-     report that already exists is re-read silently.
-   • Admin Reports (vReports): per-participant generate/open + a
-     "Generate cohort report" FAN-OUT (one Edge Function request per
-     participant, bounded parallelism, per-row progress — no queue).
-   • Data-driven lineChart()/radarChart(): the prototype's exact SVG,
-     fed the persisted numeric series instead of hard-coded arrays.
-   • exportReport(): real client-side PDF via jsPDF + html2canvas,
-     kept OFF the generation path (it rasterizes the already-rendered
-     report; it never calls the LLM).
+   1. SECTION-DRIVEN RENDERING. renderReportFrom() no longer knows which
+      sections exist. It walks content.sections in order and calls a
+      renderer per section key. A section that isn't in the array simply
+      isn't drawn — and isn't in the nav either, because the nav is built
+      from the same array.
 
-   All numbers come from the server (deterministic, scored in Postgres);
-   the LLM only wrote the prose. This module never recomputes a score.
+   2. THE NAV HIGHLIGHT NOW WORKS. initReportScroll() is overridden here
+      (reports.js loads after participant.js, so this wins) and derives its
+      section list from the nav links instead of a hardcoded array. It is
+      also called from renderReportFrom, so it runs on the ADMIN side too —
+      previously only renderParticipant() called it, which is why an admin
+      opening a report saw the highlight frozen on Summary.
 
-   Globals from earlier phases: sb (Supabase client), SUPABASE_CONFIGURED,
-   AUTH, mountOctopus, showModal/closeModal, toast, initials, meta, ME,
-   nameOf, initReportScroll, render, renderParticipant, state.
+   3. PURE SVG GENERATORS. Every chart is now a function returning ONLY an
+      <svg> string. The HTML renderer wraps it; the PDF renderer embeds it
+      directly. Previously the PDF had to dig the SVG back out of finished
+      HTML with firstSvg() doing string-slicing, which would not survive
+      four more chart types.
 
-   Load order: AFTER participant.js (which defines the prototype stubs)
-   and wpca.js, BEFORE app.js:
-     <script src="js/reports.js"></script>
+   4. NEW CHARTS. eocaBarsSVG (one bar per EOCA sitting) and lollipopSVG
+      (one chart per rater group — self, peer, manager). The old WPCAS
+      radar is retired; radarChart() is kept only for demo mode.
+
+   5. VERSION GUARD. Anything that is not schema_version 2 is refused and
+      shown as "needs updating" rather than rendered. This is what stops an
+      old-shape report producing a broken page.
+
+   UNCHANGED ON PURPOSE
+     • Participants keep both Generate and Regenerate.
+     • All numbers come from the server. This module never computes a score.
+     • Branding resolution and the cohort fan-out behave as before.
+
+   Load order (unchanged): AFTER participant.js and wpca.js, BEFORE app.js.
    ============================================================ */
 
 /* keep the prototype implementations for DEMO mode (no backend) */
@@ -39,16 +49,28 @@ var REPORTS_PROTO = {
 
 var REPORTS = {
   selfPid:     null,    // the logged-in participant's id (My Reports)
-  _selfPidCohort: undefined, // #13 which cohort selfPid was resolved for
-  selfContent: null,    // cached persisted content for self
-  selfState:   'idle',  // idle | loading | none | ready | generating
+  _selfPidCohort: undefined,
+  selfContent: null,
+  selfState:   'idle',  // idle | loading | none | stale | ready | generating
   adminView:   null,    // { pid, name, content } when an admin opens one
-  fanout:      null      // cohort fan-out progress model
+  fanout:      null
 };
+
+/* the only report shape this file can draw */
+var REPORT_SCHEMA_VERSION = 2;
 
 function reportsLive(){ return !!(window.SUPABASE_CONFIGURED && window.sb); }
 function rEsc(s){ return String(s==null?'':s)
   .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+/* Is this content object something we can render?
+   Checked in three places (participant hydrate, admin open, renderReportFrom)
+   because a wrong answer here is a blank page rather than a caught error. */
+function reportsIsV2(content){
+  return !!content
+    && content.schema_version === REPORT_SCHEMA_VERSION
+    && Array.isArray(content.sections);
+}
 
 /* current cohort id — same defensive accessor as assessments.js / wpca.js */
 function reportsCohortId(){
@@ -61,240 +83,497 @@ function reportsCohortId(){
 }
 
 /* ============================================================
-   DATA-DRIVEN CHARTS  (prototype SVG, persisted numbers)
+   SHARED CHART COLOURS
+   Same hex values the Edge Function uses in its PALETTE, so a competency
+   keeps its colour whether it is drawn here or described there.
    ============================================================ */
-function lineChart(chart){
-  if(!chart) return REPORTS_PROTO.lineChart ? REPORTS_PROTO.lineChart() : '';
-  const labels=chart.labels||[], series=chart.series||[];
-  if(labels.length<2){
-    return `<div class="muted small" style="padding:18px;text-align:center">
-      Technical progression needs at least two completed checkpoints to chart.
-      ${labels.length===1?`<div style="margin-top:6px"><b>${rEsc(labels[0])}</b>: ${series[0]&&series[0].points[0]!=null?series[0].points[0]+'%':'—'}</div>`:''}</div>`;
-  }
-  const W=560,H=240,pl=36,pb=28,pt=12,pr=12;
-  const x=i=>pl+i*((W-pl-pr)/(labels.length-1)), y=v=>pt+(100-v)/100*(H-pt-pb);
-  // path over consecutive non-null points only (gaps tolerated)
-  const path=a=>{let d='',started=false;a.forEach((v,i)=>{if(v==null){return;}d+=(started?'L':'M')+x(i)+' '+y(v);started=true;});return d;};
-  const dots=(a,c)=>a.map((v,i)=>v==null?'':`<circle cx="${x(i)}" cy="${y(v)}" r="3.5" fill="${c}"/>`).join('');
-  const grid=[0,25,50,75,100].map(v=>`<line x1="${pl}" y1="${y(v)}" x2="${W-pr}" y2="${y(v)}" stroke="#e2e8f0"/><text x="6" y="${y(v)+4}" font-size="10" fill="#94a3b8">${v}</text>`).join('');
-  const xl=labels.map((l,i)=>`<text x="${x(i)}" y="${H-8}" font-size="10" fill="#64748b" text-anchor="middle">${rEsc(l)}</text>`).join('');
-  // draw extra series first, overall (series[0]) last so it sits on top
-  const drawn=series.map((s,si)=>`<path d="${path(s.points)}" fill="none" stroke="${s.color}" stroke-width="${si===0?2.5:2}"/>${dots(s.points,s.color)}`);
-  const ordered=[...drawn.slice(1),drawn[0]].join('');
-  const legend=series.map(s=>`<span><i style="background:${s.color}"></i>${rEsc(s.name)}</span>`).join('');
-  return `<svg viewBox="0 0 ${W} ${H}" width="100%">${grid}${ordered}${xl}</svg>
-    <div class="legend">${legend}</div>`;
-}
-function radarChart(radar){
-  if(!radar) return `<div class="muted small" style="padding:20px;text-align:center">No 360 data available yet.</div>`;
-  if(radar.axes===undefined && REPORTS_PROTO.radarChart) return REPORTS_PROTO.radarChart(); // demo signature
-  const axes=radar.axes||[], self=radar.self||[], other=radar.others;
-  if(!axes.length) return `<div class="muted small" style="padding:20px;text-align:center">No 360 data available yet.</div>`;
-  const cx=190,cy=170,R=115,N=axes.length,max=5;
-  const pt=(i,v)=>{const a=-Math.PI/2+i*2*Math.PI/N,r=v/max*R;return [cx+r*Math.cos(a),cy+r*Math.sin(a)];};
-  const ring=l=>{let p='';for(let i=0;i<N;i++){const[x,y]=pt(i,l);p+=(i?'L':'M')+x+' '+y;}return p+'Z';};
-  const poly=(a,c,f)=>{let p='';a.forEach((v,i)=>{const[x,y]=pt(i,v);p+=(i?'L':'M')+x+' '+y;});return `<path d="${p}Z" fill="${f}" stroke="${c}" stroke-width="2"/>`;};
-  const spokes=axes.map((_,i)=>{const[x,y]=pt(i,max);return `<line x1="${cx}" y1="${cy}" x2="${x}" y2="${y}" stroke="#e2e8f0"/>`;}).join('');
-  const labs=axes.map((a,i)=>{const[x,y]=pt(i,max*1.14);return _radarLabel(x,y,cx,a);}).join('');
-  const rings=[1,2,3,4,5].map(l=>`<path d="${ring(l)}" fill="none" stroke="#e6f1f7"/>`).join('');
-  const otherPoly=(other&&other.length===N)?poly(other,'#3c9052','rgba(60,144,82,.15)'):'';
-  return `<svg viewBox="0 0 380 350" width="380" height="350" xmlns="http://www.w3.org/2000/svg">${rings}${spokes}${otherPoly}${poly(self,'#016796','rgba(1,103,150,.18)')}${labs}</svg>`;
-}
+var RCOLORS = {
+  primary:   '#016796',   // endline / latest / self
+  secondary: '#3c9052',   // baseline / peer
+  accent:    '#c98a00',   // manager
+  grid:      '#e2e8f0',
+  ring:      '#e6f1f7',
+  axis:      '#94a3b8',
+  label:     '#475569'
+};
 
-/* shared radar axis label: anchor by which side of centre it sits, and wrap
-   long competency names onto two lines so they don't clip the viewBox. */
+/* one colour per rater group, keyed by the section's chart.key */
+var WPCAS_GROUP_COLORS = {
+  self:    RCOLORS.primary,
+  peer:    RCOLORS.secondary,
+  manager: RCOLORS.accent
+};
+
+/* ============================================================
+   LABEL HELPERS
+   ============================================================ */
+
+/* Radar axis label: anchor by which side of centre it sits on, and split
+   long competency names over two lines so they don't clip the viewBox. */
 function _radarLabel(x,y,cx,text){
   const anchor = Math.abs(x-cx)<10 ? 'middle' : (x<cx?'end':'start');
   const t=String(text);
-  if(t.length<=13) return `<text x="${x}" y="${y}" font-size="9.5" fill="#475569" text-anchor="${anchor}">${rEsc(t)}</text>`;
+  if(t.length<=13) return `<text x="${x}" y="${y}" font-size="9.5" fill="${RCOLORS.label}" text-anchor="${anchor}">${rEsc(t)}</text>`;
   const w=t.split(/\s+/);
   const half = w.length<2 ? 1 : Math.ceil(w.length/2);
   const l1=w.slice(0,half).join(' '), l2=w.slice(half).join(' ');
-  return `<text x="${x}" font-size="9.5" fill="#475569" text-anchor="${anchor}">`
+  return `<text x="${x}" font-size="9.5" fill="${RCOLORS.label}" text-anchor="${anchor}">`
     + `<tspan x="${x}" y="${y-4}">${rEsc(l1)}</tspan>`
     + (l2?`<tspan x="${x}" y="${y+7}">${rEsc(l2)}</tspan>`:'')
     + `</text>`;
 }
 
-/* ---- technical competency radar: one axis per competency, Baseline vs Latest (0-100) ---- */
-function _trFirst(a){ for(const v of a){ if(v!=null) return Number(v); } return null; }
-function _trLast(a){ for(let i=a.length-1;i>=0;i--){ if(a[i]!=null) return Number(a[i]); } return null; }
-function techRadarData(chart){
-  if(!chart || !Array.isArray(chart.series)) return null;
-  const comp=chart.series.filter(s=>s && s.name!=='Overall' && Array.isArray(s.points));
-  if(comp.length<3) return null;                        // a radar needs >=3 axes to read well
-  const axes=comp.map(s=>s.name);
-  const latest=comp.map(s=>_trLast(s.points));
-  const multi=(chart.labels||[]).length>=2;
-  let baseline=multi?comp.map(s=>_trFirst(s.points)):null;
-  if(baseline && baseline.every((v,i)=>v===latest[i])) baseline=null;   // single distinct checkpoint
-  return { axes, latest, baseline };
+/* Truncate to a character budget, keeping the full text in a <title> so
+   hovering still reveals it. Used for lollipop row labels, where the left
+   margin is fixed and some competency names are 30+ characters. */
+function _clip(text, maxChars){
+  const t=String(text==null?'':text);
+  return t.length<=maxChars ? rEsc(t) : rEsc(t.slice(0,maxChars-1))+'…';
 }
+
+/* Split a bar-chart x-axis label over at most two lines. SVG text does not
+   wrap on its own — every line needs an explicit tspan. */
+function _wrap2(text, x, y, maxChars){
+  const t=String(text==null?'':text).trim();
+  if(t.length<=maxChars){
+    return `<tspan x="${x}" y="${y}">${rEsc(t)}</tspan>`;
+  }
+  const words=t.split(/\s+/);
+  let l1='', l2='';
+  for(const w of words){
+    if((l1?l1+' '+w:w).length<=maxChars && !l2) l1 = l1?l1+' '+w:w;
+    else l2 = l2?l2+' '+w:w;
+  }
+  if(!l1){ l1=t.slice(0,maxChars); l2=t.slice(maxChars); }
+  if(l2.length>maxChars) l2=l2.slice(0,maxChars-1)+'…';
+  return `<tspan x="${x}" y="${y}">${rEsc(l1)}</tspan>`
+       + `<tspan x="${x}" y="${y+11}">${rEsc(l2)}</tspan>`;
+}
+
+/* ============================================================
+   PURE SVG GENERATOR 1 — TECHNICAL RADAR (baseline vs endline)
+
+   Takes the v2 `technical` section data and returns { axes, primary,
+   primaryLabel, secondary, secondaryLabel } or null when a radar would be
+   unreadable (fewer than three axes).
+
+   "primary" is whichever series is the more recent one available, so a
+   cohort with only a baseline still gets a filled polygon rather than an
+   empty chart with a legend pointing at nothing.
+   ============================================================ */
+function techRadarData(data){
+  if(!data || !Array.isArray(data.axes) || !Array.isArray(data.series)) return null;
+  if(data.axes.length < 3) return null;          // a radar needs 3+ spokes to read
+
+  const base = data.series.find(s=>s.key==='baseline') || null;
+  const end  = data.series.find(s=>s.key==='endline')  || null;
+
+  const primary   = end || base;
+  if(!primary) return null;
+  const secondary = (end && base) ? base : null;  // only a comparison if both exist
+
+  return {
+    axes: data.axes,
+    primary:        primary.points || [],
+    primaryLabel:   primary.label || (end?'Endline':'Baseline'),
+    secondary:      secondary ? (secondary.points || []) : null,
+    secondaryLabel: secondary ? (secondary.label || 'Baseline') : null
+  };
+}
+
 function techRadarSVG(d){
-  const axes=d.axes, N=axes.length, cx=220,cy=180,R=112,max=100;
-  const pt=(i,v)=>{const a=-Math.PI/2+i*2*Math.PI/N,r=(v==null?0:v)/max*R;return [cx+r*Math.cos(a),cy+r*Math.sin(a)];};
+  const axes=d.axes, N=axes.length, cx=220, cy=180, R=112, max=100;
+
+  // Convert (axis index, value) to an x/y point on the web.
+  // -PI/2 puts the first axis at the top rather than the right.
+  const pt=(i,v)=>{
+    const a=-Math.PI/2 + i*2*Math.PI/N;
+    const r=(v==null?0:v)/max*R;
+    return [cx+r*Math.cos(a), cy+r*Math.sin(a)];
+  };
   const ringPath=l=>{let p='';for(let i=0;i<N;i++){const[x,y]=pt(i,l);p+=(i?'L':'M')+x+' '+y;}return p+'Z';};
   const poly=(arr,stroke,fill)=>{let p='';arr.forEach((v,i)=>{const[x,y]=pt(i,v);p+=(i?'L':'M')+x+' '+y;});return `<path d="${p}Z" fill="${fill}" stroke="${stroke}" stroke-width="2"/>`;};
-  const rings=[25,50,75,100].map(l=>`<path d="${ringPath(l)}" fill="none" stroke="#e6f1f7"/>`).join('');
-  const spokes=axes.map((_,i)=>{const[x,y]=pt(i,max);return `<line x1="${cx}" y1="${cy}" x2="${x}" y2="${y}" stroke="#e2e8f0"/>`;}).join('');
+
+  const rings=[25,50,75,100].map(l=>`<path d="${ringPath(l)}" fill="none" stroke="${RCOLORS.ring}"/>`).join('');
+  const spokes=axes.map((_,i)=>{const[x,y]=pt(i,max);return `<line x1="${cx}" y1="${cy}" x2="${x}" y2="${y}" stroke="${RCOLORS.grid}"/>`;}).join('');
   const labs=axes.map((a,i)=>{const[x,y]=pt(i,max*1.16);return _radarLabel(x,y,cx,a);}).join('');
-  const base=d.baseline?poly(d.baseline,'#3c9052','rgba(60,144,82,.14)'):'';
-  const latest=poly(d.latest,'#016796','rgba(1,103,150,.18)');
-  return `<svg viewBox="0 0 440 360" width="440" height="360" xmlns="http://www.w3.org/2000/svg">${rings}${spokes}${base}${latest}${labs}</svg>`;
+
+  // Draw the older series first so the newer one sits on top of it.
+  const back = d.secondary ? poly(d.secondary, RCOLORS.secondary, 'rgba(60,144,82,.14)') : '';
+  const front = poly(d.primary, RCOLORS.primary, 'rgba(1,103,150,.18)');
+
+  return `<svg viewBox="0 0 440 360" width="100%" xmlns="http://www.w3.org/2000/svg">`
+    + rings + spokes + back + front + labs + `</svg>`;
 }
-function techRadarChart(chart){
-  const d=techRadarData(chart);
-  if(!d) return lineChart(chart);                        // <3 competencies → keep the trend line
-  const legend=d.baseline
-    ? `<div class="legend" style="justify-content:center"><span><i style="background:#3c9052"></i>Baseline</span><span><i style="background:#016796"></i>Latest</span></div>`
-    : `<div class="legend" style="justify-content:center"><span><i style="background:#016796"></i>Score</span></div>`;
-  return `<div style="display:flex;justify-content:center">${techRadarSVG(d)}</div>${legend}`;
+
+/* ============================================================
+   PURE SVG GENERATOR 2 — EOCA BAR CHART
+   One bar per EOCA sitting. Name on x, percentage on y.
+   Objectives are deliberately not shown — the raw Obj/S2-Obj codes are
+   unresolved in the objectives table and mean nothing to a participant.
+   ============================================================ */
+function eocaBarsSVG(bars){
+  if(!bars || !bars.length) return null;
+
+  const W=560, PL=36, PR=14, PT=16, PB=48;
+  const H=250;
+  const plotW=W-PL-PR, plotH=H-PT-PB;
+  const y=v=>PT+(100-v)/100*plotH;
+
+  const band=plotW/bars.length;
+  const barW=Math.max(14, Math.min(56, band*0.58));
+
+  const grid=[0,25,50,75,100].map(v=>
+    `<line x1="${PL}" y1="${y(v)}" x2="${W-PR}" y2="${y(v)}" stroke="${RCOLORS.grid}"/>`
+    + `<text x="6" y="${y(v)+4}" font-size="10" fill="${RCOLORS.axis}">${v}</text>`
+  ).join('');
+
+  // How many characters fit under one bar, roughly 5.6px per char at 10px.
+  const maxChars=Math.max(6, Math.floor(band/5.6));
+
+  const drawn=bars.map((b,i)=>{
+    const cxBar=PL+band*i+band/2;
+    const x0=cxBar-barW/2;
+    const v=Number(b.pct);
+    const top=y(v);
+    return `<rect x="${x0}" y="${top}" width="${barW}" height="${Math.max(1,y(0)-top)}" rx="3" fill="${RCOLORS.primary}"/>`
+      + `<text x="${cxBar}" y="${top-5}" font-size="10.5" fill="${RCOLORS.label}" text-anchor="middle">${v}%</text>`
+      + `<text font-size="10" fill="${RCOLORS.axis}" text-anchor="middle">${_wrap2(b.name, cxBar, H-PB+16, maxChars)}</text>`;
+  }).join('');
+
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" xmlns="http://www.w3.org/2000/svg">`
+    + grid + drawn + `</svg>`;
+}
+
+/* ============================================================
+   PURE SVG GENERATOR 3 — LOLLIPOP CHART
+   One chart per rater group. Competency names down the y axis, score
+   along the x axis. A "lollipop" is just a horizontal line from the
+   scale minimum out to the score, with a filled circle at the end —
+   easier to read than a bar when the baseline isn't zero, which it
+   isn't here because the Likert scale starts at 1.
+   ============================================================ */
+function lollipopSVG(chart, scale){
+  const pts=(chart && chart.points) || [];
+  if(!pts.length) return null;
+
+  const min=(scale && scale.min!=null) ? scale.min : 1;
+  const max=(scale && scale.max!=null) ? scale.max : 5;
+  const colour=WPCAS_GROUP_COLORS[chart.key] || RCOLORS.primary;
+
+  const W=560, PL=196, PR=44, PT=14, ROW=26;
+  const H=PT + pts.length*ROW + 30;
+  const plotW=W-PL-PR;
+
+  const x=v=>PL + ((v-min)/(max-min))*plotW;
+  const y=i=>PT + i*ROW + ROW/2;
+
+  // A vertical gridline and label at each whole point on the scale.
+  let ticks='';
+  for(let v=min; v<=max; v++){
+    ticks += `<line x1="${x(v)}" y1="${PT}" x2="${x(v)}" y2="${PT+pts.length*ROW}" stroke="${RCOLORS.grid}"/>`
+           + `<text x="${x(v)}" y="${H-10}" font-size="10" fill="${RCOLORS.axis}" text-anchor="middle">${v}</text>`;
+  }
+
+  const rows=pts.map((p,i)=>{
+    const v=Number(p.score);
+    const yy=y(i);
+    return `<text x="${PL-12}" y="${yy+3.5}" font-size="10.5" fill="${RCOLORS.label}" text-anchor="end">`
+         + `<title>${rEsc(p.competency)}</title>${_clip(p.competency,32)}</text>`
+         + `<line x1="${x(min)}" y1="${yy}" x2="${x(v)}" y2="${yy}" stroke="${colour}" stroke-width="2" stroke-linecap="round"/>`
+         + `<circle cx="${x(v)}" cy="${yy}" r="5" fill="${colour}"/>`
+         + `<text x="${x(v)+11}" y="${yy+3.5}" font-size="10.5" fill="${RCOLORS.label}">${v}</text>`;
+  }).join('');
+
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" xmlns="http://www.w3.org/2000/svg">`
+    + ticks + rows + `</svg>`;
+}
+
+/* ============================================================
+   LEGACY DEMO CHARTS
+   Only reached when there is no backend (reportsLive() is false). The v2
+   renderer never calls these, but REPORTS_PROTO captured the prototype
+   versions at load time and demo mode still needs them defined.
+   ============================================================ */
+function lineChart(chart){
+  if(!chart) return REPORTS_PROTO.lineChart ? REPORTS_PROTO.lineChart() : '';
+  const labels=chart.labels||[], series=chart.series||[];
+  if(labels.length<2) return `<div class="muted small" style="padding:18px;text-align:center">Not enough checkpoints to chart.</div>`;
+  const W=560,H=240,pl=36,pb=28,pt=12,pr=12;
+  const x=i=>pl+i*((W-pl-pr)/(labels.length-1)), y=v=>pt+(100-v)/100*(H-pt-pb);
+  const path=a=>{let d='',started=false;a.forEach((v,i)=>{if(v==null){return;}d+=(started?'L':'M')+x(i)+' '+y(v);started=true;});return d;};
+  const dots=(a,c)=>a.map((v,i)=>v==null?'':`<circle cx="${x(i)}" cy="${y(v)}" r="3.5" fill="${c}"/>`).join('');
+  const grid=[0,25,50,75,100].map(v=>`<line x1="${pl}" y1="${y(v)}" x2="${W-pr}" y2="${y(v)}" stroke="${RCOLORS.grid}"/><text x="6" y="${y(v)+4}" font-size="10" fill="${RCOLORS.axis}">${v}</text>`).join('');
+  const xl=labels.map((l,i)=>`<text x="${x(i)}" y="${H-8}" font-size="10" fill="#64748b" text-anchor="middle">${rEsc(l)}</text>`).join('');
+  const drawn=series.map((s,si)=>`<path d="${path(s.points)}" fill="none" stroke="${s.color}" stroke-width="${si===0?2.5:2}"/>${dots(s.points,s.color)}`);
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%">${grid}${[...drawn.slice(1),drawn[0]].join('')}${xl}</svg>`;
+}
+function radarChart(radar){
+  if(!radar && REPORTS_PROTO.radarChart) return REPORTS_PROTO.radarChart();
+  return `<div class="muted small" style="padding:20px;text-align:center">No 360 data available.</div>`;
 }
 function firstSvg(html){ if(!html) return null; const a=html.indexOf('<svg'); const b=html.indexOf('</svg>'); return (a>=0&&b>=0)?html.slice(a,b+6):null; }
 
-/* ------------------------------------------------------------------
-   DERIVED application summary (Phase-9 WPCAS)
-   ------------------------------------------------------------------
-   The Google Form used to ask two extra things directly:
-     • an "overall application rating" (a 4-point band), and
-     • "developmental focus areas".
-   We no longer ask them - we DERIVE them from the 21 behavioural ratings
-   that already feed the radar, so there is nothing extra to capture.
+/* ============================================================
+   HTML SECTION RENDERERS
 
-   Input `radar` is the same object the radar chart uses:
-     { axes:[names], self:[scores], others:[pooled scores] }.
-   The radar is drawn on a 0-5 scale (see radarChart, max=5), so we band on /5.
-   Returns null when there isn't enough 360 data yet (so the card just hides).
-   ------------------------------------------------------------------ */
-function wpcaDerivedApplication(radar){
-  if(!radar || !Array.isArray(radar.axes) || !radar.axes.length) return null;
-  const axes = radar.axes;
-  // prefer the pooled OTHER-rater view (the real 360 signal); fall back to self
-  // if others are withheld for confidentiality.
-  const vals = (radar.others && radar.others.length === axes.length) ? radar.others : (radar.self || []);
-  if(!vals.length) return null;
-  // pair each competency with its score, dropping any axis without a number
-  const pairs = axes
-    .map((a,i)=>({ axis:a, v:(typeof vals[i]==='number' ? vals[i] : null) }))
-    .filter(p => p.v != null);
-  if(!pairs.length) return null;
+   One function per section key. Each receives the section's `data` plus
+   the whole content object (for metrics in the summary band) and returns
+   the inner HTML for that <section>.
 
-  const mean = pairs.reduce((s,p)=>s+p.v, 0) / pairs.length;
-  // 4-point band on the /5 radar scale (matches the "of 5" behavioural score)
-  const band = mean < 1     ? 'Not yet observed'
-             : mean < 2.5   ? 'Applying with support'
-             : mean < 3.75  ? 'Applying independently'
-             :                'Applying and guiding others';
-  // development focus = the two LOWEST-scoring competencies (scale-independent)
-  const focus = pairs.slice().sort((a,b)=>a.v-b.v).slice(0,2).map(p=>p.axis);
-  return { band, mean, focus };
+   A key with no entry here renders nothing, so the Edge Function can add
+   a new section before the front end knows about it without breaking.
+   ============================================================ */
+
+function _metricTiles(m){
+  if(!m) return '';
+  const gain = m.technical_gain_pct==null ? '—' : (m.technical_gain_pct>=0?'+':'')+m.technical_gain_pct+'%';
+  const wp   = m.wpcas_overall==null ? '—' : m.wpcas_overall;
+  const stg  = m.stages_completed_pct==null ? '—' : m.stages_completed_pct+'%';
+  const r    = m.raters || {};
+  const tot  = (r.self||0)+(r.peer||0)+(r.manager||0);
+  return `<div class="metric-tiles">
+    <div class="mt"><div class="v tnum">${gain}</div><div class="l">Technical gain (baseline→endline)</div></div>
+    <div class="mt"><div class="v tnum">${wp}</div><div class="l">WPCAS overall (of 5)</div></div>
+    <div class="mt"><div class="v tnum">${stg}</div><div class="l">Stages completed</div></div>
+    <div class="mt"><div class="v tnum">${tot}</div><div class="l">Raters · 360</div></div></div>`;
 }
+
+/* Compact competency table used under the technical radar. Inline styles
+   because the stylesheet has no table class. */
+function _compTable(rows){
+  if(!rows || !rows.length) return '';
+  const cell='padding:6px 10px;border-bottom:1px solid var(--g100);font-size:12.5px';
+  const head='padding:6px 10px;border-bottom:1px solid var(--g200);font-size:11px;color:var(--g500);text-align:left;font-weight:600';
+  const anyBase = rows.some(r=>r.baseline_pct!=null);
+  const anyEnd  = rows.some(r=>r.endline_pct!=null);
+  const body=rows.map(r=>{
+    const d = r.delta==null ? '—' : (r.delta>=0?'+':'')+r.delta;
+    const dcol = r.delta==null ? 'var(--g500)' : (r.delta>=0?'#2a7040':'#a33');
+    return `<tr><td style="${cell}">${rEsc(r.competency)}</td>`
+      + (anyBase?`<td style="${cell};text-align:right" class="tnum">${r.baseline_pct==null?'—':r.baseline_pct+'%'}</td>`:'')
+      + (anyEnd ?`<td style="${cell};text-align:right" class="tnum">${r.endline_pct==null?'—':r.endline_pct+'%'}</td>`:'')
+      + (anyBase&&anyEnd?`<td style="${cell};text-align:right;color:${dcol}" class="tnum">${d}</td>`:'')
+      + `</tr>`;
+  }).join('');
+  return `<div class="card pad" style="margin-top:12px;padding-top:8px">
+    <table style="width:100%;border-collapse:collapse">
+      <thead><tr><th style="${head}">Competency</th>
+        ${anyBase?`<th style="${head};text-align:right">Baseline</th>`:''}
+        ${anyEnd ?`<th style="${head};text-align:right">Endline</th>`:''}
+        ${anyBase&&anyEnd?`<th style="${head};text-align:right">Change</th>`:''}
+      </tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
+function _aiBlock(label, text, teal){
+  if(!text) return '';
+  const style = teal ? ' style="border-color:var(--teal);background:#eef6f0"' : '';
+  const lab   = teal ? ' style="background:#dcf0e3;color:#1f5b34"' : '';
+  return `<div class="ai-block"${style}><span class="ai-label"${lab}>✦ ${rEsc(label)}</span>
+    <p style="margin:8px 0 0">${rEsc(text)}</p></div>`;
+}
+
+var SECTION_HTML = {
+
+  summary: function(data, content){
+    const s=content.subject||{};
+    return `<div class="summary-band"><div>
+      <div class="ai-label" style="background:rgba(255,255,255,.18);color:#fff">✦ AI-generated</div>
+      <h1 style="color:#fff;margin:10px 0 4px">${rEsc(s.name||'')} — ${content.type==='stage'?'Stage report':'Lifecycle report'}</h1>
+      <div style="opacity:.85;font-size:13px">${rEsc(s.meta||'')}${s.cohort_name?' · '+rEsc(s.cohort_name):''}</div></div>
+      <p style="margin:14px 0 0;opacity:.95;max-width:600px">${rEsc(data.narrative||'')}</p>
+      ${_metricTiles(content.metrics)}</div>`;
+  },
+
+  technical: function(data){
+    const d=techRadarData(data);
+    // Below three competencies a radar is unreadable, so the table carries
+    // the section on its own rather than drawing a triangle nobody can read.
+    const chart = d
+      ? `<div class="card pad" style="display:flex;justify-content:center">${techRadarSVG(d)}</div>
+         <div class="legend" style="justify-content:center">
+           ${d.secondary?`<span><i style="background:${RCOLORS.secondary}"></i>${rEsc(d.secondaryLabel)}</span>`:''}
+           <span><i style="background:${RCOLORS.primary}"></i>${rEsc(d.primaryLabel)}</span></div>`
+      : '';
+    const oneSided = d && !d.secondary
+      ? `<p class="muted small" style="margin:8px 0 0">Only one checkpoint is available, so no change over time is shown.</p>`
+      : '';
+    return `<p class="muted small" style="margin-bottom:12px">Percentage score per competency, baseline against endline.</p>
+      ${chart}${oneSided}${_compTable(data.table)}
+      ${_aiBlock('AI interpretation', data.narrative)}`;
+  },
+
+  eoca: function(data){
+    const svg=eocaBarsSVG(data.bars);
+    return `<p class="muted small" style="margin-bottom:12px">Percentage score in each end-of-course assessment.</p>
+      ${svg?`<div class="card pad">${svg}</div>`:''}
+      ${_aiBlock('AI interpretation', data.narrative)}`;
+  },
+
+  wpcas: function(data){
+    const charts=(data.charts||[]).map(c=>{
+      const svg=lollipopSVG(c, data.scale);
+      if(!svg) return '';
+      // n_raters is shown so the reader can weigh the number. A peer average
+      // over three people and a single manager rating are different kinds of
+      // evidence and should not look identical on the page.
+      const n = c.n_raters===1 ? '1 rater' : (c.n_raters||0)+' raters';
+      return `<div class="card pad" style="margin-top:12px">
+        <div class="flex ac jb" style="margin-bottom:6px">
+          <b style="font-size:13px">${rEsc(c.label)}</b>
+          <span class="tag">${n}</span></div>${svg}</div>`;
+    }).join('');
+
+    const band=data.application_band;
+    const focus=data.development_focus||[];
+    const derived=(band || focus.length) ? `<div class="card pad" style="margin-top:12px">
+        <span class="ai-label">✦ Derived from the ratings</span>
+        <div class="rep-2col" style="margin-top:10px">
+          <div><div class="muted small">Overall application</div><b>${rEsc(band||'—')}</b></div>
+          <div><div class="muted small">Development focus (2 lowest)</div><b>${focus.map(rEsc).join(' · ')||'—'}</b></div>
+        </div></div>` : '';
+
+    const roundNote = data.round_name
+      ? `<p class="muted small" style="margin-bottom:4px">Round: ${rEsc(data.round_name)}. Scores are on a 1–5 scale.</p>`
+      : `<p class="muted small" style="margin-bottom:4px">Scores are on a 1–5 scale.</p>`;
+
+    return `${roundNote}${charts}${derived}${_aiBlock('AI synthesis', data.narrative)}`;
+  },
+
+  per_competency: function(data){
+    const rows=(data.rows||[]).map(r=>{
+      const bit=(lab,v)=>v==null?'':`<span class="tag" style="margin-right:6px">${lab} ${v}</span>`;
+      return `<div class="ai-block" style="margin-top:10px">
+        <span class="ai-label">✦ ${rEsc(r.competency)}</span>
+        <div style="margin:8px 0 0">
+          ${r.technical_pct==null?'':`<span class="tag" style="margin-right:6px">Technical ${r.technical_pct}%</span>`}
+          ${bit('Self',r.self)}${bit('Peer',r.peer)}${bit('Manager',r.manager)}
+        </div>
+        ${r.commentary?`<p style="margin:8px 0 0">${rEsc(r.commentary)}</p>`:''}</div>`;
+    }).join('');
+    return `<p class="muted small" style="margin-bottom:4px">Technical score and 360 ratings side by side, for competencies measured by both.</p>${rows}`;
+  },
+
+  strengths_gaps: function(data){
+    const strengths=(data.strengths||[]).map(x=>`<li>${rEsc(x)}</li>`).join('');
+    const devs=(data.development_areas||[]).map(x=>`<li>${rEsc(x)}</li>`).join('');
+    return `<div class="rep-2col">
+      <div class="card pad"><div class="badge ok" style="margin-bottom:8px">Strengths</div>
+        <ul style="margin:0;padding-left:18px">${strengths||'<li class="muted">—</li>'}</ul></div>
+      <div class="card pad"><div class="badge warn" style="margin-bottom:8px">Development areas</div>
+        <ul style="margin:0;padding-left:18px">${devs||'<li class="muted">—</li>'}</ul></div></div>`;
+  },
+
+  recommendations: function(data){
+    return _aiBlock('AI-generated', data.narrative, true);
+  }
+};
 
 /* ============================================================
    RENDER A PERSISTED REPORT  (shared by participant + admin views)
    ============================================================ */
-function reportMetricTiles(m){
-  const gain = m.technical_gain_pct==null ? '—' : (m.technical_gain_pct>=0?'+':'')+m.technical_gain_pct+'%';
-  const beh  = m.behavioral_score==null ? '—' : m.behavioral_score;
-  const stg  = m.stages_completed_pct==null ? '—' : m.stages_completed_pct+'%';
-  const rat  = m.raters || 0;
-  return `<div class="metric-tiles">
-    <div class="mt"><div class="v tnum">${gain}</div><div class="l">Technical gain (first→last)</div></div>
-    <div class="mt"><div class="v tnum">${beh}</div><div class="l">Behavioral score (of 5)</div></div>
-    <div class="mt"><div class="v tnum">${stg}</div><div class="l">Stages completed</div></div>
-    <div class="mt"><div class="v tnum">${rat}</div><div class="l">Raters · 360</div></div></div>`;
+function reportsNeedsUpdateCard(opts){
+  const btn = opts && opts.pid
+    ? `<button class="btn" onclick="reportsRegenerate('${opts.pid}',${opts.admin?true:false})">Update this report</button>`
+    : '';
+  return `<div class="card pad" style="max-width:620px;text-align:center">
+    <div style="font-size:40px">✦</div>
+    <h3 style="margin:8px 0">This report needs updating</h3>
+    <p class="muted" style="margin:0 auto 16px;max-width:460px">It was generated in an older format. Updating rebuilds it with the current sections and charts.</p>
+    ${btn}</div>`;
 }
+
 function renderReportFrom(content, opts){
   opts=opts||{};
-  const n=content.narrative||{}, s=content.subject||{}, c=content.charts||{};
-  const hasBehavioral = !!(c.radar && Array.isArray(c.radar.axes) && c.radar.axes.length);
-  const first=(s.name||'').split(/\s+/)[0]||'This participant';
-  const perComp=(n.per_competency||[]).map(pc=>`<div class="ai-block" style="margin-top:10px">
-    <span class="ai-label">✦ ${rEsc(pc.competency)}</span>
-    <p style="margin:8px 0 0">${rEsc(pc.commentary)}</p></div>`).join('') ||
-    `<p class="muted small">No competency tags on this assessment blueprint.</p>`;
-  const strengths=(n.strengths||[]).map(x=>`<li>${rEsc(x)}</li>`).join('');
-  const devs=(n.development_areas||[]).map(x=>`<li>${rEsc(x)}</li>`).join('');
-  const suppNote=(content.notes&&content.notes.behavioral_suppressed)
-    ? `<p class="muted small" style="margin-top:8px">Pooled-other ratings are withheld because fewer than ${content.notes.anonymity_floor||3} raters responded — protecting rater confidentiality. Only the self-assessment is charted.</p>`
-    : '';
-  // DERIVED (not asked directly): overall application band + development focus.
-  // Prefer the server-computed values (authoritative, also in the PDF and fed to
-  // the narrative); fall back to computing from the radar for reports generated
-  // before the server started providing them. Hidden when there's no data.
-  const derived = (content.derived && (content.derived.application_band || (content.derived.development_focus||[]).length))
-    ? { band: content.derived.application_band, focus: content.derived.development_focus || [] }
-    : wpcaDerivedApplication(c.radar);
-  const derivedCard = derived ? `<div class="card pad" style="margin-top:12px">
-        <span class="ai-label">✦ Derived from the 21 ratings</span>
-        <div class="rep-2col" style="margin-top:10px">
-          <div><div class="muted small">Overall application</div><b>${rEsc(derived.band)}</b></div>
-          <div><div class="muted small">Development focus (2 lowest)</div><b>${derived.focus.map(rEsc).join(' · ')||'—'}</b></div>
-        </div></div>` : '';
+
+  // Guard first. An old-shape blob reaching the section walker below would
+  // render as a page with a nav and no content, which looks like a bug
+  // rather than a report that simply needs regenerating.
+  if(!reportsIsV2(content)) return reportsNeedsUpdateCard(opts);
+
+  const s=content.subject||{};
+  const sections=content.sections;
+
+  // The nav and the body are built from the same array in the same order,
+  // so they cannot disagree about which sections exist.
+  const nav=sections.map((sec,i)=>
+    `<a href="#${rEsc(sec.key)}"${i===0?' class="on"':''}>${rEsc(sec.title||sec.key)}</a>`
+  ).join('');
+
+  const body=sections.map((sec,i)=>{
+    const fn=SECTION_HTML[sec.key];
+    if(!fn) return '';                        // unknown key: skip, don't break
+    const inner=fn(sec.data||{}, content, opts);
+    if(!inner) return '';
+    const heading = sec.key==='summary' ? '' : `<h2 style="margin-bottom:4px">${rEsc(sec.title||sec.key)}</h2>`;
+    return `<section id="${rEsc(sec.key)}"${i?' style="margin-top:26px"':''}>${heading}${inner}</section>`;
+  }).join('');
+
   const regenBtn = opts.canRegenerate
     ? `<button class="btn ghost sm" onclick="reportsRegenerate('${opts.pid}',${opts.admin?true:false})">↻ Regenerate</button>` : '';
   const backBtn = opts.admin
     ? `<button class="btn ghost sm" onclick="REPORTS.adminView=null;renderAdmin()">← All reports</button>` : '';
   const genAt = content.generated_at ? new Date(content.generated_at).toLocaleString() : '';
-  // #8 branding: always resolve the CURRENT org/cohort branding (Ministry/
-  // Department/Organisation) and patch it in after paint, so the report header
-  // and the banner stay consistent. Cache context for the PDF export.
+
+  // Cache for the PDF export, then patch branding and wire the scroll-spy
+  // once this HTML is actually in the DOM.
   REPORTS.exportCtx = { content, opts };
-  setTimeout(() => reportsBrandPatch(content, opts), 0);
+  setTimeout(()=>{ reportsBrandPatch(content, opts); initReportScroll(); }, 0);
 
   return `<div class="report-wrap"><div class="report-grid">
-    <div class="section-nav" id="secNav">
-      <a href="#summary" class="on">Summary</a><a href="#technical">Technical progression</a>
-      ${hasBehavioral?'<a href="#behavioral">WPCAS</a>':''}<a href="#themes">Strengths &amp; gaps</a><a href="#recs">Recommendations</a></div>
+    <div class="section-nav" id="secNav">${nav}</div>
     <div id="reportRoot">
       <div id="reportBrand">${reportsBrandBarHtml(content.branding||null)}</div>
       <div class="flex jb ac" style="margin-bottom:16px">
         <div class="crumb">${opts.admin?'Reports / '+rEsc(s.name||''):'My Reports / Comprehensive'}</div>
         <div class="flex g8 ac">${backBtn}${regenBtn}
           <button class="btn ghost sm" id="exportPdfBtn" onclick="exportReport()">⤓ Export PDF</button></div></div>
-
-      <section id="summary"><div class="summary-band"><div>
-        <div class="ai-label" style="background:rgba(255,255,255,.18);color:#fff">✦ AI-generated</div>
-        <h1 style="color:#fff;margin:10px 0 4px">${rEsc(s.name||'')} — ${content.type==='stage'?'Stage report':'Lifecycle report'}</h1>
-        <div style="opacity:.85;font-size:13px">${rEsc(s.meta||'')}${s.cohort_name?' · '+rEsc(s.cohort_name):''}</div></div>
-        <p style="margin:14px 0 0;opacity:.95;max-width:600px">${rEsc(n.summary||'')}</p></div></section>
-
-      <section id="technical" style="margin-top:26px"><h2 style="margin-bottom:4px">Technical progression</h2>
-        <p class="muted small" style="margin-bottom:12px">Per-competency scores — baseline vs latest checkpoint (a trend line is shown when fewer than three competencies are tagged).</p>
-        <div class="card pad">${techRadarChart(c.technical)}</div>
-        <div class="ai-block"><span class="ai-label">✦ AI interpretation</span>
-        <p style="margin:8px 0 0">${rEsc(n.technical_interpretation||'')}</p></div></section>
-
-      ${hasBehavioral?`<section id="behavioral" style="margin-top:26px"><h2 style="margin-bottom:4px">WPCAS</h2>
-        <p class="muted small" style="margin-bottom:12px">Self-rating vs. aggregated other-raters (anonymized).</p>
-        <div class="card pad" style="display:flex;justify-content:center">${radarChart(c.radar)}</div>
-        ${c.radar?`<div class="legend" style="justify-content:center"><span><i style="background:var(--indigo)"></i>Self</span>${(c.radar.others)?'<span><i style="background:var(--teal)"></i>Others (aggregated)</span>':''}</div>`:''}
-        ${suppNote}
-        ${derivedCard}
-        <div class="ai-block"><span class="ai-label">✦ AI synthesis</span>
-        <p style="margin:8px 0 0">${rEsc(n.behavioral_synthesis||'')}</p></div></section>`:''}
-
-      <section id="themes" style="margin-top:26px"><h2 style="margin-bottom:12px">Per-competency &amp; development</h2>
-        ${perComp}
-        <div class="rep-2col" style="margin-top:14px">
-          <div class="card pad"><div class="badge ok" style="margin-bottom:8px">Strengths</div>
-            <ul style="margin:0;padding-left:18px">${strengths||'<li class="muted">—</li>'}</ul></div>
-          <div class="card pad"><div class="badge warn" style="margin-bottom:8px">Development areas</div>
-            <ul style="margin:0;padding-left:18px">${devs||'<li class="muted">—</li>'}</ul></div></div></section>
-
-      <section id="recs" style="margin-top:26px"><h2 style="margin-bottom:12px">Recommendations</h2>
-        <div class="ai-block" style="border-color:var(--teal);background:#eef6f0"><span class="ai-label" style="background:#dcf0e3;color:#1f5b34">✦ AI-generated</span>
-        <p style="margin:8px 0 0">${rEsc(n.recommendations||'')}</p></div>
-        <p class="muted small" style="margin-top:16px">All narrative sections are LLM-generated from server-scored results, the question blueprint, and anonymized 360 aggregates${genAt?' · generated '+rEsc(genAt):''}.</p></section>
+      ${body}
+      <p class="muted small" style="margin-top:16px">Narrative sections are generated from server-scored results and the question blueprint${genAt?' · generated '+rEsc(genAt):''}.</p>
     </div></div></div>`;
 }
 
 /* ============================================================
-   #8 REPORT BRANDING HEADER
-   Ministry/department logo + label at the top of the report (inside
-   #reportRoot, so it is captured by the PDF export). New reports carry
-   content.branding; older ones are resolved live from current org/cohort
-   branding and patched into #reportBrand after paint.
+   SCROLL-SPY  (overrides participant.js)
+
+   Two fixes over the previous version:
+     • the section list is read from the nav links, so any set of sections
+       works — previously it was the hardcoded array
+       ['summary','technical','behavioral','themes','recs'].
+     • renderReportFrom calls this itself, so it runs on the admin side too.
+       Previously only renderParticipant() called it.
+   ============================================================ */
+function initReportScroll(){
+  setTimeout(()=>{
+    const main=document.querySelector('.main');
+    const nav=document.getElementById('secNav');
+    if(!main||!nav) return;
+
+    const links=Array.from(nav.querySelectorAll('a'));
+    const secs=links
+      .map(a=>document.getElementById((a.getAttribute('href')||'').slice(1)))
+      .filter(Boolean);
+    if(!secs.length) return;
+
+    // Whichever section's top has passed 200px from the viewport top is the
+    // one being read. Iterating forwards means the LAST match wins, which is
+    // the lowest section scrolled past.
+    main.onscroll=()=>{
+      let cur=secs[0].id;
+      secs.forEach(sec=>{ if(sec.getBoundingClientRect().top<200) cur=sec.id; });
+      links.forEach(a=>a.classList.toggle('on', a.getAttribute('href')==='#'+cur));
+    };
+
+    links.forEach(a=>a.onclick=e=>{
+      e.preventDefault();
+      const el=document.getElementById((a.getAttribute('href')||'').slice(1));
+      if(el) el.scrollIntoView({behavior:'smooth',block:'start'});
+    });
+  },50);
+}
+
+/* ============================================================
+   REPORT BRANDING HEADER  (unchanged)
    ============================================================ */
 function reportsBrandUrl(path){
   if (!path) return null;
@@ -315,9 +594,6 @@ function reportsBrandBarHtml(b){
     + `<div style="min-width:0">${txt}</div></div>`;
 }
 async function reportsResolveBrand(content, opts){
-  // Baked branding travels with the report; the CURRENT org/cohort brand
-  // (Ministry/Department/Organisation) wins so the header + PDF reflect the
-  // latest values set in the assessment wizard.
   if (!reportsLive()) return (content && content.branding) || null;
   try {
     let cohortId = null;
@@ -346,6 +622,7 @@ async function reportsBrandPatch(content, opts){
 
 /* ============================================================
    PARTICIPANT — My Reports
+   Participants keep both Generate and Regenerate, by decision.
    ============================================================ */
 function pReport(){
   if(!reportsLive()) return REPORTS_PROTO.pReport ? REPORTS_PROTO.pReport() : '';
@@ -353,24 +630,28 @@ function pReport(){
   if(REPORTS.selfState==='ready' && REPORTS.selfContent){
     return renderReportFrom(REPORTS.selfContent, { canRegenerate:true, pid:REPORTS.selfPid });
   }
+  if(REPORTS.selfState==='stale'){
+    return `<div class="page-head"><h1>My Reports</h1></div>
+      <div class="card pad" style="max-width:620px;text-align:center">
+        <div style="font-size:40px">✦</div>
+        <h3 style="margin:8px 0">Your report needs updating</h3>
+        <p class="muted" style="margin:0 auto 16px;max-width:460px">It was generated in an older format. Rebuilding it will include your latest assessment scores and 360 feedback.</p>
+        <button class="btn" onclick="reportsGenerateSelf()">Update my report</button></div>`;
+  }
   if(REPORTS.selfState==='none'){
     return `<div class="page-head"><h1>My Reports</h1></div>
       <div class="card pad" style="max-width:620px;text-align:center">
         <div style="font-size:40px">✦</div>
         <h3 style="margin:8px 0">Your report isn't generated yet</h3>
-        <p class="muted" style="margin:0 auto 16px;max-width:440px">We'll analyze your assessment scores against the question blueprint and synthesize your anonymized 360 feedback into a development report.</p>
+        <p class="muted" style="margin:0 auto 16px;max-width:440px">We'll analyse your assessment scores against the question blueprint and synthesise your 360 feedback into a development report.</p>
         <button class="btn" onclick="reportsGenerateSelf()">Generate my report</button></div>`;
   }
-  // idle/loading → kick the async load, show a light placeholder
   if(REPORTS.selfState==='idle'){ REPORTS.selfState='loading'; setTimeout(reportsHydrateSelf,0); }
   return `<div class="page-head"><h1>My Reports</h1></div>
     <div class="card pad" style="text-align:center"><div class="muted small">Loading your report…</div></div>`;
 }
 
 async function reportsResolveSelfPid(){
-  // #13 a person may have a participant row in several cohorts. Pick the row for
-  // the switcher's selected cohort; fall back to the most-recent row when none is
-  // selected yet. Cache is keyed by cohort so switching re-resolves cleanly.
   const want = (window.state && state.pcohort) || null;
   if(REPORTS.selfPid && REPORTS._selfPidCohort===want) return REPORTS.selfPid;
   let uid = (window.AUTH && window.AUTH.uid) || null;
@@ -382,10 +663,11 @@ async function reportsResolveSelfPid(){
     .order('created_at',{ascending:false});
   if(!rows || !rows.length) return null;
   let pick = want ? rows.find(r=>r.cohort_id===want) : null;
-  if(!pick) pick = rows[0];   // most-recent enrollment
+  if(!pick) pick = rows[0];
   REPORTS.selfPid=pick.id; REPORTS.selfSubject=pick; REPORTS._selfPidCohort=want;
   return REPORTS.selfPid;
 }
+
 async function reportsHydrateSelf(){
   try{
     const pid = await reportsResolveSelfPid();
@@ -394,15 +676,24 @@ async function reportsHydrateSelf(){
       .select('id,content,generated_at,type,status')
       .eq('participant_id', pid).eq('scope','participant').is('deleted_at', null)
       .order('generated_at',{ascending:false}).limit(1).maybeSingle();
-    if(data && data.content){ REPORTS.selfContent=data.content; REPORTS.selfState='ready'; }
-    else { REPORTS.selfState='none'; }
+
+    if(!data || !data.content){
+      REPORTS.selfState='none';
+    } else if(!reportsIsV2(data.content) || data.status==='stale'){
+      // A report exists but predates the current shape. Say so plainly
+      // rather than pretending nothing is there.
+      REPORTS.selfContent=null; REPORTS.selfState='stale';
+    } else {
+      REPORTS.selfContent=data.content; REPORTS.selfState='ready';
+    }
   }catch(e){ console.warn('report hydrate failed',e); REPORTS.selfState='none'; }
   renderParticipant();
 }
+
 async function reportsGenerateSelf(){
   const pid = await reportsResolveSelfPid();
   if(!pid){ toast('Could not find your participant record','err'); return; }
-  const main=document.querySelector('.main'); if(main) mountOctopus(main,'Analyzing your results and writing your report…');
+  const main=document.querySelector('.main'); if(main) mountOctopus(main,'Analysing your results and writing your report…');
   REPORTS.selfState='generating';
   try{
     const { data, error } = await sb.functions.invoke('generate-report',{ body:{ participant_id:pid, type:'comprehensive' } });
@@ -415,9 +706,10 @@ async function reportsGenerateSelf(){
   }
   renderParticipant();
 }
+
 function reportsRegenerate(pid, isAdmin){
   showModal({ title:'Regenerate this report?',
-    body:'This re-runs the LLM over the latest scores and 360 aggregates and replaces the current report. This cannot be undone.',
+    body:'This re-runs the analysis over the latest scores and 360 ratings and replaces the current report. This cannot be undone.',
     confirm:'Regenerate', onConfirm:async()=>{
       closeModal();
       const main=document.querySelector('.main'); if(main) mountOctopus(main,'Regenerating the report…');
@@ -432,17 +724,19 @@ function reportsRegenerate(pid, isAdmin){
 }
 
 /* ============================================================
-   PDF EXPORT  (client-side, OFF the generation path)
-   Builds a VECTOR document with pdfmake from the persisted report
-   object — sharp text, real page breaks, no DOM rasterization.
-   Charts (SVG) are embedded directly; the branding logo (if any) is
-   fetched and embedded as a dataURL so the PDF is self-contained.
+   PDF EXPORT
+
+   Built from the SAME pure SVG generators the HTML renderer uses, and
+   driven by the SAME sections array in the same order. Previously the PDF
+   had its own hardcoded section order and had to extract SVGs out of
+   finished HTML — two things that could silently drift apart.
    ============================================================ */
-function _pdfH2(t, margin){ return { text:t, fontSize:13, bold:true, color:'#0f172a', margin: margin || [0,0,0,2] }; }
+function _pdfH2(t, margin){ return { text:t, fontSize:13, bold:true, color:'#0f172a', margin: margin || [0,14,0,2] }; }
 function _pdfAI(text, stroke, fill){
   return { table:{ widths:['*'], body:[[{ text:text, fontSize:10, lineHeight:1.3, color:'#1e293b', margin:[8,6,8,6], fillColor: fill || '#e6f1f7' }]] },
-    layout:{ hLineWidth:()=>0, vLineWidth:(i)=> i===0 ? 3 : 0, vLineColor:()=> stroke || '#016796' }, margin:[0,4,0,0] };
+    layout:{ hLineWidth:()=>0, vLineWidth:(i)=> i===0 ? 3 : 0, vLineColor:()=> stroke || RCOLORS.primary }, margin:[0,4,0,0] };
 }
+/* pdfmake wants no width attribute fighting its own sizing. */
 function _pdfCleanSvg(svg){
   if (!svg) return svg;
   svg = svg.replace(/\swidth="100%"/,'');
@@ -457,19 +751,135 @@ async function _pdfLogoDataUrl(path){
     return await new Promise(res => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = () => res(null); fr.readAsDataURL(b); });
   } catch (e){ return null; }
 }
+
+/* One PDF builder per section key, mirroring SECTION_HTML. Each pushes
+   blocks onto the shared stack. */
+var SECTION_PDF = {
+
+  summary: function(data, content, stack){
+    const s=content.subject||{}, m=content.metrics||{};
+    stack.push({ columns:[
+      { width:11, svg:'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12" width="9" height="9"><path d="M6 0 L7.2 4.8 L12 6 L7.2 7.2 L6 12 L4.8 7.2 L0 6 L4.8 4.8 Z" fill="#016796"/></svg>', margin:[0,1,0,0] },
+      { width:'*', text:'AI-GENERATED', fontSize:8, bold:true, color:RCOLORS.primary }
+    ], columnGap:3, margin:[0,0,0,3] });
+    stack.push({ text:`${s.name||''} — ${content.type==='stage'?'Stage report':'Lifecycle report'}`, fontSize:18, bold:true, color:'#013d57' });
+    const metaLine=[s.meta,s.cohort_name].filter(Boolean).join(' · ');
+    if(metaLine) stack.push({ text:metaLine, fontSize:10, color:'#64748b', margin:[0,2,0,8] });
+    if(data.narrative) stack.push({ text:data.narrative, fontSize:10.5, lineHeight:1.3, margin:[0,0,0,8] });
+
+    const r=m.raters||{};
+    const tiles=[
+      ['Technical gain', m.technical_gain_pct==null?'—':(m.technical_gain_pct>=0?'+':'')+m.technical_gain_pct+'%'],
+      ['WPCAS overall',  m.wpcas_overall==null?'—':String(m.wpcas_overall)+' / 5'],
+      ['Stages done',    m.stages_completed_pct==null?'—':m.stages_completed_pct+'%'],
+      ['Raters · 360',   String((r.self||0)+(r.peer||0)+(r.manager||0))]
+    ];
+    stack.push({ columns: tiles.map(([l,v])=>({ width:'*', stack:[
+      { text:v, fontSize:13, bold:true, color:'#013d57' },
+      { text:l, fontSize:8, color:'#64748b' }
+    ]})), columnGap:10, margin:[0,0,0,10] });
+  },
+
+  technical: function(data, content, stack){
+    stack.push(_pdfH2('Technical progression'));
+    const d=techRadarData(data);
+    if(d){
+      stack.push({ svg:_pdfCleanSvg(techRadarSVG(d)), width:340, alignment:'center', margin:[0,4,0,2] });
+      const legend=[d.secondary?d.secondaryLabel:null, d.primaryLabel].filter(Boolean).join('  vs  ');
+      stack.push({ text:legend, fontSize:8, color:'#64748b', alignment:'center', margin:[0,0,0,6] });
+    }
+    const rows=data.table||[];
+    if(rows.length){
+      const anyBase=rows.some(r=>r.baseline_pct!=null), anyEnd=rows.some(r=>r.endline_pct!=null);
+      const head=['Competency'];
+      if(anyBase) head.push('Baseline');
+      if(anyEnd)  head.push('Endline');
+      if(anyBase&&anyEnd) head.push('Change');
+      const body=[head.map(h=>({ text:h, fontSize:8, bold:true, color:'#64748b' }))];
+      rows.forEach(r=>{
+        const line=[{ text:r.competency||'', fontSize:9 }];
+        if(anyBase) line.push({ text:r.baseline_pct==null?'—':r.baseline_pct+'%', fontSize:9, alignment:'right' });
+        if(anyEnd)  line.push({ text:r.endline_pct==null?'—':r.endline_pct+'%', fontSize:9, alignment:'right' });
+        if(anyBase&&anyEnd) line.push({ text:r.delta==null?'—':(r.delta>=0?'+':'')+r.delta, fontSize:9, alignment:'right' });
+        body.push(line);
+      });
+      stack.push({ table:{ headerRows:1, widths:[ '*', ...head.slice(1).map(()=>46) ], body },
+        layout:{ hLineWidth:(i)=> i===1?0.7:0.3, vLineWidth:()=>0, hLineColor:()=>'#e2e8f0' }, margin:[0,2,0,4] });
+    }
+    if(data.narrative) stack.push(_pdfAI(data.narrative));
+  },
+
+  eoca: function(data, content, stack){
+    stack.push(_pdfH2('EOCA performance'));
+    const svg=eocaBarsSVG(data.bars);
+    if(svg) stack.push({ svg:_pdfCleanSvg(svg), width:400, alignment:'center', margin:[0,4,0,4] });
+    if(data.narrative) stack.push(_pdfAI(data.narrative));
+  },
+
+  wpcas: function(data, content, stack){
+    stack.push(_pdfH2('WPCAS 360 ratings'));
+    (data.charts||[]).forEach(c=>{
+      const svg=lollipopSVG(c, data.scale);
+      if(!svg) return;
+      const n = c.n_raters===1 ? '1 rater' : (c.n_raters||0)+' raters';
+      stack.push({ text:`${c.label} · ${n}`, fontSize:9, bold:true, color:'#01536f', margin:[0,6,0,2] });
+      stack.push({ svg:_pdfCleanSvg(svg), width:420, alignment:'center', margin:[0,0,0,4] });
+    });
+    if(data.application_band || (data.development_focus||[]).length){
+      stack.push({ columns:[
+        { width:'*', stack:[{ text:'Overall application', fontSize:8, color:'#64748b' }, { text:data.application_band||'—', fontSize:10, bold:true }] },
+        { width:'*', stack:[{ text:'Development focus', fontSize:8, color:'#64748b' }, { text:(data.development_focus||[]).join(' · ')||'—', fontSize:10, bold:true }] }
+      ], columnGap:16, margin:[0,4,0,4] });
+    }
+    if(data.narrative) stack.push(_pdfAI(data.narrative));
+  },
+
+  per_competency: function(data, content, stack){
+    stack.push(_pdfH2('Per-competency performance'));
+    (data.rows||[]).forEach(r=>{
+      const bits=[];
+      if(r.technical_pct!=null) bits.push('Technical '+r.technical_pct+'%');
+      if(r.self!=null)    bits.push('Self '+r.self);
+      if(r.peer!=null)    bits.push('Peer '+r.peer);
+      if(r.manager!=null) bits.push('Manager '+r.manager);
+      stack.push({ text:r.competency||'', bold:true, fontSize:10, color:'#01536f', margin:[0,6,0,1] });
+      if(bits.length) stack.push({ text:bits.join('  ·  '), fontSize:8.5, color:'#64748b', margin:[0,0,0,2] });
+      if(r.commentary) stack.push({ text:r.commentary, fontSize:10, lineHeight:1.3 });
+    });
+  },
+
+  strengths_gaps: function(data, content, stack){
+    stack.push(_pdfH2('Strengths & development areas'));
+    const strengths=data.strengths||[], devs=data.development_areas||[];
+    stack.push({ columns:[
+      { width:'*', stack:[{ text:'Strengths', bold:true, fontSize:9, color:'#2a7040', margin:[0,2,0,3] }, strengths.length?{ ul:strengths, fontSize:10 }:{ text:'—', color:'#94a3b8' }] },
+      { width:'*', stack:[{ text:'Development areas', bold:true, fontSize:9, color:'#8a6406', margin:[0,2,0,3] }, devs.length?{ ul:devs, fontSize:10 }:{ text:'—', color:'#94a3b8' }] }
+    ], columnGap:16 });
+  },
+
+  recommendations: function(data, content, stack){
+    stack.push(_pdfH2('Recommendations'));
+    if(data.narrative) stack.push(_pdfAI(data.narrative, RCOLORS.secondary, '#eef6f0'));
+  }
+};
+
 async function exportReport(){
   if(!reportsLive()) return REPORTS_PROTO.exportReport ? REPORTS_PROTO.exportReport() : null;
   const ctx = REPORTS.exportCtx;
   const content = ctx && ctx.content;
   if(!content){ toast('Nothing to export','err'); return; }
+  if(!reportsIsV2(content)){ toast('This report needs updating before it can be exported','err'); return; }
   if(!window.pdfMake){ toast('PDF library not loaded','err'); return; }
-  const btn=document.getElementById('exportPdfBtn'); if(btn){ btn.disabled=true; btn.textContent='Preparing…'; }
+
+  const btn=document.getElementById('exportPdfBtn');
+  if(btn){ btn.disabled=true; btn.textContent='Preparing…'; }
+
   try{
-    const n=content.narrative||{}, s=content.subject||{}, c=content.charts||{}, m=content.metrics||{};
+    const s=content.subject||{};
     const brand = REPORTS.effectiveBrand || content.branding || null;
     const stack=[];
 
-    // branding header (Ministry / Department / Organisation + optional logo)
+    // branding header
     const brandLines=[brand&&brand.ministry,brand&&brand.department,brand&&brand.organisation,brand&&brand.label,brand&&brand.sublabel]
       .map(x=>(x==null?'':String(x).trim())).filter(Boolean);
     const logoData = (brand&&brand.logo_path) ? await _pdfLogoDataUrl(brand.logo_path) : null;
@@ -481,47 +891,14 @@ async function exportReport(){
       stack.push({ canvas:[{ type:'line', x1:0, y1:0, x2:515, y2:0, lineWidth:0.7, lineColor:'#e2e8f0' }], margin:[0,0,0,12] });
     }
 
-    // title band — the star is drawn as vector (pdfmake's font has no ✦ glyph)
-    stack.push({ columns:[
-      { width:11, svg:'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12" width="9" height="9"><path d="M6 0 L7.2 4.8 L12 6 L7.2 7.2 L6 12 L4.8 7.2 L0 6 L4.8 4.8 Z" fill="#016796"/></svg>', margin:[0,1,0,0] },
-      { width:'*', text:'AI-GENERATED', fontSize:8, bold:true, color:'#016796' }
-    ], columnGap:3, margin:[0,0,0,3] });
-    stack.push({ text:`${s.name||''} — ${content.type==='stage'?'Stage report':'Lifecycle report'}`, fontSize:18, bold:true, color:'#013d57' });
-    const metaLine=[s.meta,s.cohort_name].filter(Boolean).join(' · ');
-    if(metaLine) stack.push({ text:metaLine, fontSize:10, color:'#64748b', margin:[0,2,0,8] });
-    if(n.summary) stack.push({ text:n.summary, fontSize:10.5, lineHeight:1.3, margin:[0,0,0,14] });
-
-    // technical
-    stack.push(_pdfH2('Technical progression'));
-    const techSvg=firstSvg(techRadarChart(c.technical));
-    if(techSvg) stack.push({ svg:_pdfCleanSvg(techSvg), width:360, alignment:'center', margin:[0,4,0,4] });
-    if(n.technical_interpretation) stack.push(_pdfAI(n.technical_interpretation));
-
-    // behavioral 360 — omitted entirely when there is no 360 data
-    const radSvg=(c.radar && (c.radar.axes||[]).length)?firstSvg(radarChart(c.radar)):null;
-    if(radSvg){
-      stack.push(_pdfH2('WPCAS',[0,16,0,0]));
-      stack.push({ svg:_pdfCleanSvg(radSvg), width:300, alignment:'center', margin:[0,4,0,4] });
-      if(n.behavioral_synthesis) stack.push(_pdfAI(n.behavioral_synthesis));
-    }
-
-    // per-competency + strengths/development
-    stack.push(_pdfH2('Per-competency & development',[0,16,0,0]));
-    (n.per_competency||[]).forEach(pc=>{
-      stack.push({ text:pc.competency||'', bold:true, fontSize:10, color:'#01536f', margin:[0,6,0,1] });
-      stack.push({ text:pc.commentary||'', fontSize:10, lineHeight:1.3, margin:[0,0,0,2] });
+    // Same array, same order, same generators as the screen.
+    content.sections.forEach(sec=>{
+      const fn=SECTION_PDF[sec.key];
+      if(fn) fn(sec.data||{}, content, stack);
     });
-    const strengths=(n.strengths||[]), devs=(n.development_areas||[]);
-    stack.push({ columns:[
-      { width:'*', stack:[{ text:'Strengths', bold:true, fontSize:9, color:'#2a7040', margin:[0,8,0,3] }, strengths.length?{ ul:strengths, fontSize:10 }:{ text:'—', color:'#94a3b8' }] },
-      { width:'*', stack:[{ text:'Development areas', bold:true, fontSize:9, color:'#8a6406', margin:[0,8,0,3] }, devs.length?{ ul:devs, fontSize:10 }:{ text:'—', color:'#94a3b8' }] },
-    ], columnGap:16 });
 
-    // recommendations
-    stack.push(_pdfH2('Recommendations',[0,16,0,0]));
-    if(n.recommendations) stack.push(_pdfAI(n.recommendations,'#3c9052','#eef6f0'));
     const genAt=content.generated_at?new Date(content.generated_at).toLocaleString():'';
-    stack.push({ text:`All narrative sections are LLM-generated from server-scored results, the question blueprint, and anonymized 360 aggregates${genAt?' · generated '+genAt:''}.`, fontSize:8, color:'#94a3b8', margin:[0,12,0,0] });
+    stack.push({ text:`Narrative sections are generated from server-scored results and the question blueprint${genAt?' · generated '+genAt:''}.`, fontSize:8, color:'#94a3b8', margin:[0,14,0,0] });
 
     const docDef={ pageSize:'A4', pageMargins:[40,40,40,40], defaultStyle:{ fontSize:10, color:'#1e293b' }, content:stack };
     const who=(s.name||'report').replace(/[^a-z0-9]+/gi,'_');
@@ -539,13 +916,13 @@ function vReports(){
   if(REPORTS.adminView && REPORTS.adminView.content){
     return renderReportFrom(REPORTS.adminView.content, { admin:true, canRegenerate:true, pid:REPORTS.adminView.pid });
   }
-  // list shell; async fill
   setTimeout(reportsHydrateAdminList,0);
   return `<div class="crumb">Reports</div><div class="page-head"><h1>Reports</h1>
     <button class="btn" onclick="reportsCohortFanout()">＋ Generate cohort report</button></div>
     <div class="card pad"><h3 style="margin-bottom:12px">Individual reports</h3>
       <div id="reportList"><div class="muted small">Loading participants…</div></div></div>`;
 }
+
 async function reportsHydrateAdminList(){
   const host=document.getElementById('reportList'); if(!host) return;
   const coh=reportsCohortId();
@@ -553,23 +930,34 @@ async function reportsHydrateAdminList(){
   try{
     const [{data:parts},{data:reps}] = await Promise.all([
       sb.from('participants').select('id,name,designation,workstream,location').eq('cohort_id',coh).is('deleted_at',null).order('name'),
-      sb.from('reports').select('participant_id,generated_at,type').eq('cohort_id',coh).eq('scope','participant').is('deleted_at',null)
+      // status is selected so the list can distinguish a current report from
+      // one that predates the v2 shape, without pulling every content blob.
+      sb.from('reports').select('participant_id,generated_at,type,status').eq('cohort_id',coh).eq('scope','participant').is('deleted_at',null)
     ]);
     const repBy={}; (reps||[]).forEach(r=>{ repBy[r.participant_id]=r; });
     if(!parts || !parts.length){ host.innerHTML='<div class="muted small">No participants in this cohort yet.</div>'; return; }
+
     host.innerHTML=parts.map(p=>{
-      const has=repBy[p.id];
-      const right = has
-        ? `<div class="flex g8 ac"><span class="badge ok">✓ ready</span>
-            <button class="btn ghost sm" onclick="reportsAdminOpen('${p.id}','${rEsc(p.name).replace(/'/g,"\\'")}')">Open →</button></div>`
-        : `<button class="btn ghost sm" onclick="reportsAdminGenerate('${p.id}',this)">Generate</button>`;
+      const rep=repBy[p.id];
+      const safeName=rEsc(p.name).replace(/'/g,"\\'");
+      let right;
+      if(!rep){
+        right=`<button class="btn ghost sm" onclick="reportsAdminGenerate('${p.id}',this)">Generate</button>`;
+      } else if(rep.status==='stale'){
+        right=`<div class="flex g8 ac"><span class="badge warn">needs update</span>
+          <button class="btn ghost sm" onclick="reportsAdminGenerate('${p.id}',this)">Update</button></div>`;
+      } else {
+        right=`<div class="flex g8 ac"><span class="badge ok">✓ ready</span>
+          <button class="btn ghost sm" onclick="reportsAdminOpen('${p.id}','${safeName}')">Open →</button></div>`;
+      }
       return `<div class="flex ac jb" style="padding:11px 0;border-bottom:1px solid var(--g100)">
-        <div class="flex ac g12"><div class="avatar" style="background:var(--teal)">${initials(p.n||p.name)}</div>
+        <div class="flex ac g12"><div class="avatar" style="background:var(--teal)">${initials(p.name)}</div>
         <div><b>${rEsc(p.name)}</b><div class="muted small">${rEsc([p.designation,p.workstream,p.location].filter(Boolean).join(' · ')||'Team member')}</div></div></div>
         ${right}</div>`;
     }).join('');
   }catch(e){ host.innerHTML='<div class="badge err">Could not load: '+rEsc(e.message||e)+'</div>'; }
 }
+
 async function reportsAdminOpen(pid,name){
   const main=document.querySelector('.main'); if(main) main.innerHTML='<div class="card pad"><div class="muted small">Opening report…</div></div>';
   try{
@@ -580,16 +968,21 @@ async function reportsAdminOpen(pid,name){
     renderAdmin();
   }catch(e){ toast(String(e.message||e),'err'); REPORTS.adminView=null; renderAdmin(); }
 }
+
 async function reportsAdminGenerate(pid, btn){
   if(btn){ btn.disabled=true; btn.textContent='Generating…'; }
   try{
-    const { data, error } = await sb.functions.invoke('generate-report',{ body:{ participant_id:pid, type:'comprehensive' } });
+    // regenerate:true so an existing stale row is rebuilt rather than
+    // returned as-is by the function's cheap re-read path.
+    const { data, error } = await sb.functions.invoke('generate-report',{ body:{ participant_id:pid, type:'comprehensive', regenerate:true } });
     if(error || (data&&data.error)){ throw new Error((data&&data.error)||error.message); }
     toast('Report generated','ok'); reportsHydrateAdminList();
   }catch(e){ toast(String(e.message||e),'err'); if(btn){ btn.disabled=false; btn.textContent='Generate'; } }
 }
 
-/* ---- cohort fan-out: one request per participant, bounded parallelism ---- */
+/* ---- cohort fan-out: one request per participant, bounded parallelism ----
+   The Stop button and its cancellation flag are the next piece of work;
+   this is the existing behaviour, unchanged. */
 async function reportsCohortFanout(){
   const coh=reportsCohortId();
   if(!coh){ toast('Select a cohort first','err'); return; }
@@ -605,7 +998,7 @@ async function reportsCohortFanout(){
       const it=REPORTS.fanout.items[cursor++];
       it.status='generating'; updateFanoutRow(it);
       try{
-        const { data, error } = await sb.functions.invoke('generate-report',{ body:{ participant_id:it.id, type:'comprehensive' } });
+        const { data, error } = await sb.functions.invoke('generate-report',{ body:{ participant_id:it.id, type:'comprehensive', regenerate:true } });
         if(error || (data&&data.error)) throw new Error((data&&data.error)||error.message);
         it.status='done';
       }catch(e){ it.status='error'; it.err=String(e.message||e); }
@@ -616,6 +1009,7 @@ async function reportsCohortFanout(){
   REPORTS.fanout.running=false; updateFanoutHead();
   const failed=REPORTS.fanout.items.filter(i=>i.status==='error').length;
   toast(failed? `Cohort done · ${failed} failed`:'Cohort report complete', failed?'err':'ok');
+  reportsHydrateAdminList();
 }
 function fanoutPill(s){ return s==='done'?'<span class="badge ok">✓ done</span>'
   : s==='generating'?'<span class="badge info">generating…</span>'
