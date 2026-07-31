@@ -65,7 +65,23 @@ var WPCA = {
   review:   null    // active review session (see wpcaOpenReview)
 };
 
-var WPCA_LIKERT = ['Strongly disagree','Disagree','Neutral','Agree','Strongly agree'];
+/* FALLBACK answer options, used ONLY when a question arrives without any
+   options of its own (see wpcaQuestionOptions below).
+
+   These are the real WPCAS anchors, and the count matters as much as the
+   wording. This array used to hold a five-point agree/disagree scale, which
+   caused a genuine data problem: every likert question in the instrument has
+   exactly THREE options, so when the fallback fired a rater was shown five
+   buttons and their answer was stored as position 4 or 5 — a position that
+   maps to no real option, and therefore an answer nobody can interpret.
+   Seven such answers had to be deleted.
+
+   A fallback should supply a DEFAULT, never a different scale. If the
+   instrument ever moves off three points, change it here and in the
+   question_options rows together. There is now also a database trigger
+   (wpca_validate_likert) that rejects any rating outside a question's real
+   option count, so a mismatch fails loudly instead of corrupting data. */
+var WPCA_LIKERT = ['Seen but inconsistent','Consistent, independent','Consistent + guides others'];
 
 /* A small per-question Likert instrument used ONLY in demo mode, so the
    360 player is fully explorable without a backend. In live mode the
@@ -810,8 +826,9 @@ function wpca360PromptHtml(prompt, stemId, subject){
    you chart it: whatever shape comes in, this returns ONE consistent array of
    { ordinal, label } that the button code can simply loop over — so nothing
    else in the player has to care about the incoming format. Blank labels (e.g.
-   an empty opt5) are dropped, and if no usable options are found we fall back
-   to the built-in 5-point Likert so a question is never left without buttons. */
+   an empty opt4) are dropped, and if no usable options are found we fall back
+   to WPCA_LIKERT so a question is never left without buttons — but that path
+   now logs a warning, because it means the real options failed to load. */
 function wpcaQuestionOptions(q){
   var out = [];
   if (q){
@@ -856,8 +873,17 @@ function wpcaQuestionOptions(q){
     }
   }
 
-  // Fallback — the built-in 5-point scale, so the survey always has buttons.
+  // Fallback — the built-in scale, so the survey always has buttons.
+  //
+  // Reaching here means the question's real options did not load, which is a
+  // BUG rather than a normal case: every uploaded WPCA question carries its
+  // own options. The console warning matters because the previous silent
+  // fallback is exactly how mis-scaled answers got into the database
+  // unnoticed. If you see this in the console, find out why the options are
+  // missing rather than trusting the buttons on screen.
   if (!out.length){
+    console.warn('[CEGIS] WPCA question has no options; falling back to the built-in '
+      + WPCA_LIKERT.length + '-point scale. Question:', q && (q.question_id || q.id), q && q.prompt);
     out = WPCA_LIKERT.map(function(lbl, i){ return { ordinal: i + 1, label: lbl }; });
   }
   return out;

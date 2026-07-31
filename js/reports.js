@@ -30,7 +30,14 @@
       shown as "needs updating" rather than rendered. This is what stops an
       old-shape report producing a broken page.
 
-   6. COHORT FAN-OUT CAN BE STOPPED. The run now carries a cancel flag that
+   6. THE 360 SCALE IS NO LONGER ASSUMED. lollipopSVG sizes its axis from
+      the scale shipped inside the report, and prints the instrument's anchor
+      labels beneath it. The metric tile reads its denominator from
+      metrics.wpcas_scale_max. Previously both hardcoded 5, while the WPCAS
+      instrument actually has three anchors — so every score rendered against
+      an axis half again too long.
+
+   7. COHORT FAN-OUT CAN BE STOPPED. The run now carries a cancel flag that
       the workers check between participants, plus a pre-flight dialog that
       defaults to skipping reports already on the current shape. Stop cannot
       abort requests already in flight — see the comment above the fan-out
@@ -265,21 +272,44 @@ function lollipopSVG(chart, scale){
   if(!pts.length) return null;
 
   const min=(scale && scale.min!=null) ? scale.min : 1;
-  const max=(scale && scale.max!=null) ? scale.max : 5;
+  // Fallback of 3 matches the WPCAS instrument, but it should never be
+  // reached — the Edge Function reads the real scale from the instrument and
+  // ships it inside the report. An earlier version defaulted to 5, which
+  // squeezed every score into the lower half of the axis.
+  const max=(scale && scale.max!=null) ? scale.max : 3;
+  const labels=(scale && Array.isArray(scale.labels)) ? scale.labels : [];
   const colour=WPCAS_GROUP_COLORS[chart.key] || RCOLORS.primary;
 
   const W=560, PL=196, PR=44, PT=14, ROW=26;
-  const H=PT + pts.length*ROW + 30;
+  // Room at the bottom for two lines: the scale numbers, then the anchor
+  // legend explaining what those numbers mean.
+  const legendH = labels.length ? 30 : 16;
+  const rowsH = pts.length*ROW;
+  const H=PT + rowsH + legendH;
   const plotW=W-PL-PR;
 
   const x=v=>PL + ((v-min)/(max-min))*plotW;
   const y=i=>PT + i*ROW + ROW/2;
+  const numY = PT + rowsH + 14;
 
-  // A vertical gridline and label at each whole point on the scale.
+  // A vertical gridline and number at each whole point on the scale.
   let ticks='';
   for(let v=min; v<=max; v++){
-    ticks += `<line x1="${x(v)}" y1="${PT}" x2="${x(v)}" y2="${PT+pts.length*ROW}" stroke="${RCOLORS.grid}"/>`
-           + `<text x="${x(v)}" y="${H-10}" font-size="10" fill="${RCOLORS.axis}" text-anchor="middle">${v}</text>`;
+    ticks += `<line x1="${x(v)}" y1="${PT}" x2="${x(v)}" y2="${PT+rowsH}" stroke="${RCOLORS.grid}"/>`
+           + `<text x="${x(v)}" y="${numY}" font-size="10" fill="${RCOLORS.axis}" text-anchor="middle">${v}</text>`;
+  }
+
+  // The anchor legend. "2.4 out of 3" tells a participant nothing; naming the
+  // anchors tells them what their raters actually selected. Rendered as one
+  // centred line so it cannot collide with the tick numbers above it.
+  let legend='';
+  if(labels.length){
+    const full=labels.map((l,i)=>`${i+1} ${l}`).join('  ·  ');
+    // Long instruments would overflow the width, so drop to the two endpoints.
+    const text = full.length<=115
+      ? full
+      : `${1} ${labels[0]}  →  ${labels.length} ${labels[labels.length-1]}`;
+    legend=`<text x="${W/2}" y="${H-4}" font-size="8.5" fill="${RCOLORS.axis}" text-anchor="middle">${rEsc(text)}</text>`;
   }
 
   const rows=pts.map((p,i)=>{
@@ -293,7 +323,7 @@ function lollipopSVG(chart, scale){
   }).join('');
 
   return `<svg viewBox="0 0 ${W} ${H}" width="100%" xmlns="http://www.w3.org/2000/svg">`
-    + ticks + rows + `</svg>`;
+    + ticks + rows + legend + `</svg>`;
 }
 
 /* ============================================================
@@ -335,13 +365,18 @@ function firstSvg(html){ if(!html) return null; const a=html.indexOf('<svg'); co
 function _metricTiles(m){
   if(!m) return '';
   const gain = m.technical_gain_pct==null ? '—' : (m.technical_gain_pct>=0?'+':'')+m.technical_gain_pct+'%';
+  // Scale comes from metrics, so the tile cannot claim "of 5" on a 1-3
+  // instrument. Falls back to a bare number if the scale is unknown, which
+  // is better than asserting a wrong denominator.
+  const wpMax = m.wpcas_scale_max;
   const wp   = m.wpcas_overall==null ? '—' : m.wpcas_overall;
+  const wpLbl = wpMax ? `WPCAS overall (of ${wpMax})` : 'WPCAS overall';
   const stg  = m.stages_completed_pct==null ? '—' : m.stages_completed_pct+'%';
   const r    = m.raters || {};
   const tot  = (r.self||0)+(r.peer||0)+(r.manager||0);
   return `<div class="metric-tiles">
     <div class="mt"><div class="v tnum">${gain}</div><div class="l">Technical gain (baseline→endline)</div></div>
-    <div class="mt"><div class="v tnum">${wp}</div><div class="l">WPCAS overall (of 5)</div></div>
+    <div class="mt"><div class="v tnum">${wp}</div><div class="l">${wpLbl}</div></div>
     <div class="mt"><div class="v tnum">${stg}</div><div class="l">Stages completed</div></div>
     <div class="mt"><div class="v tnum">${tot}</div><div class="l">Raters · 360</div></div></div>`;
 }
@@ -440,9 +475,14 @@ var SECTION_HTML = {
           <div><div class="muted small">Development focus (2 lowest)</div><b>${focus.map(rEsc).join(' · ')||'—'}</b></div>
         </div></div>` : '';
 
+    // Describe the scale from the report's own data. Hardcoding "1-5" here
+    // was wrong: the WPCAS instrument has three anchors, not five.
+    const sc=data.scale||{};
+    const scMin=sc.min!=null?sc.min:1, scMax=sc.max!=null?sc.max:3;
+    const scaleNote=`Scores are on a ${scMin}–${scMax} scale.`;
     const roundNote = data.round_name
-      ? `<p class="muted small" style="margin-bottom:4px">Round: ${rEsc(data.round_name)}. Scores are on a 1–5 scale.</p>`
-      : `<p class="muted small" style="margin-bottom:4px">Scores are on a 1–5 scale.</p>`;
+      ? `<p class="muted small" style="margin-bottom:4px">Round: ${rEsc(data.round_name)}. ${scaleNote}</p>`
+      : `<p class="muted small" style="margin-bottom:4px">${scaleNote}</p>`;
 
     return `${roundNote}${charts}${derived}${_aiBlock('AI synthesis', data.narrative)}`;
   },
@@ -777,7 +817,7 @@ var SECTION_PDF = {
     const r=m.raters||{};
     const tiles=[
       ['Technical gain', m.technical_gain_pct==null?'—':(m.technical_gain_pct>=0?'+':'')+m.technical_gain_pct+'%'],
-      ['WPCAS overall',  m.wpcas_overall==null?'—':String(m.wpcas_overall)+' / 5'],
+      ['WPCAS overall',  m.wpcas_overall==null?'—':String(m.wpcas_overall)+(m.wpcas_scale_max?' / '+m.wpcas_scale_max:'')],
       ['Stages done',    m.stages_completed_pct==null?'—':m.stages_completed_pct+'%'],
       ['Raters · 360',   String((r.self||0)+(r.peer||0)+(r.manager||0))]
     ];
